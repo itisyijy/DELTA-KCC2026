@@ -7,7 +7,7 @@ timestamp_col: date
 model:
   seq_len: 336
   pred_len: 96
-  kernel_size: 25
+  kernel_size: 25    # ~1 day trend smoothing at 1h resolution
   individual: false
   revin_affine: true
 

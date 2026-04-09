@@ -35,9 +35,13 @@ cd /home/jylee/DLinear-Season-Trend
 - `epochs: 15` for centralized
 - `global_rounds: 15` for federated baselines
 - dataset-specific `seq_len`
+- dataset-specific `kernel_size`
 - `solar`: `288 -> 96` (`48h -> 16h`)
+- `solar kernel_size`: `73`
 - `murata`: `192 -> 96` (`48h -> 24h`)
+- `murata kernel_size`: `49`
 - `electricity`: `336 -> 96` (`14d -> 4d`)
+- `electricity kernel_size`: `25`
 
 `dlinear_tta`, `fed_tta`, `fed_tta_loop`는 현재 config와 동일한 `seq_len/pred_len`로 다시 학습한 체크포인트를 사용해야 합니다. 예전 `96 -> 96` 체크포인트는 그대로 재사용할 수 없습니다.
 
