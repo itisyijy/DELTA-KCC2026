@@ -2,8 +2,8 @@ baseline: dlinear_tta
 dataset: murata
 data_format: parquet
 # Update data_path to the manifest.json of your Murata legacy dataset
-data_path: /path/to/murata_legacy/manifest.json
-parquet_clients_dir: /path/to/murata_legacy/clients
+data_path: /home/jylee/datasets/archive/murata_15min_legacy_full/manifest.json
+parquet_clients_dir: /home/jylee/datasets/archive/murata_15min_legacy_full/clients
 
 model:
   seq_len: 96        # 96 × 15min = 24 hours
