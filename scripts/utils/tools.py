@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from datetime import datetime
 from pathlib import Path
@@ -63,8 +64,9 @@ def seed_everything(seed: int) -> None:
 
 def make_run_dir(output_dir: str | Path, dataset: str, baseline: str) -> Path:
     """Create and return a timestamped run directory."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(output_dir) / f"{ts}_{dataset}_{baseline}"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    pid = os.getpid()
+    run_dir = Path(output_dir) / f"{ts}_{dataset}_{baseline}_pid{pid}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 

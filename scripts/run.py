@@ -256,6 +256,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--device", default=None, help="Override device (e.g. cpu, cuda:1)")
     parser.add_argument("--checkpoint-path", default=None, dest="checkpoint_path",
                         help="Override checkpoint_path in config (for TTA baselines)")
+    parser.add_argument("--output-dir", default=None, dest="output_dir",
+                        help="Override output_dir in config")
+    parser.add_argument("--checkpoint-dir", default=None, dest="checkpoint_dir",
+                        help="Override checkpoint_dir in config")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override epochs in config (centralized baselines)")
+    parser.add_argument("--global-rounds", type=int, default=None, dest="global_rounds",
+                        help="Override global_rounds in config (federated baselines)")
+    parser.add_argument("--local-epochs", type=int, default=None, dest="local_epochs",
+                        help="Override local_epochs in config (federated baselines)")
     parser.add_argument("--max-clients", type=int, default=None, dest="max_clients",
                         help="Override max_clients in config")
     parser.add_argument("--seed", type=int, default=None)
@@ -268,6 +278,16 @@ def main(argv: list[str] | None = None) -> None:
         config = dataclasses.replace(config, device=args.device)
     if args.checkpoint_path is not None:
         config = dataclasses.replace(config, checkpoint_path=args.checkpoint_path)
+    if args.output_dir is not None:
+        config = dataclasses.replace(config, output_dir=args.output_dir)
+    if args.checkpoint_dir is not None:
+        config = dataclasses.replace(config, checkpoint_dir=args.checkpoint_dir)
+    if args.epochs is not None:
+        config = dataclasses.replace(config, epochs=args.epochs)
+    if args.global_rounds is not None:
+        config = dataclasses.replace(config, global_rounds=args.global_rounds)
+    if args.local_epochs is not None:
+        config = dataclasses.replace(config, local_epochs=args.local_epochs)
     if args.max_clients is not None:
         config = dataclasses.replace(config, max_clients=args.max_clients)
     if args.seed is not None:

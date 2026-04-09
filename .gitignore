@@ -1,1 +1,3 @@
 backgrounds
+*.pyc
+__pycache__/

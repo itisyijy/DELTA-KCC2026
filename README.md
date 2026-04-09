@@ -64,16 +64,6 @@ tmux new-session -d -s murata_centralized \
     "$PYTHON -m scripts.run --config configs/murata/centralized.yaml"
 ```
 
-``` BASH
-# 짧은 실험 예시: solar fed를 더 짧게 실행
-tmux new-session -d -s solar_fed_quick \
-    "$PYTHON -m scripts.run --config configs/solar/fed.yaml --seed 0 --global-rounds 8 --local-epochs 1 --output-dir runs/quick_solar_fed --checkpoint-dir checkpoints/quick_solar_fed"
-
-# centralized quick sanity check
-tmux new-session -d -s solar_centralized_quick \
-    "$PYTHON -m scripts.run --config configs/solar/centralized.yaml --seed 0 --epochs 8 --output-dir runs/quick_solar_centralized --checkpoint-dir checkpoints/quick_solar_centralized"
-```
-
 ## Baseline 2: FedAvg 학습
 ``` BASH
 # solar
