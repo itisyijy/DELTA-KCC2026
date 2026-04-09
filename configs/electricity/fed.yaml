@@ -1,0 +1,22 @@
+baseline: fed
+dataset: electricity
+data_format: csv
+data_path: /home/jylee/datasets/electricity.csv
+timestamp_col: date
+
+model:
+  seq_len: 96
+  pred_len: 96
+  kernel_size: 25
+  individual: false
+  revin_affine: true
+
+batch_size: 64
+lr: 0.001
+local_epochs: 3
+global_rounds: 50
+
+device: cuda:0
+seed: 0
+output_dir: runs
+checkpoint_dir: checkpoints
