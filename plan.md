@@ -14,6 +14,8 @@
 ### 2.1. 기본 예측 모델 및 업데이트 대상 파라미터
 DLinear는 이동 평균 커널(Moving Average Kernel)을 사용하여 원본 시계열을 추세(Trend)와 계절성(Seasonality) 성분으로 분해하며, 각 성분은 독립적인 선형 네트워크($W_{trend}$, $W_{season}$)를 통과하여 합산된다. 본 연구의 TTA 과정에서는 별도의 보조 레이어(예: Batch Normalization) 추가 없이, DLinear의 본연의 가중치인 $W_{trend}$와 $W_{season}$ 자체를 직접 업데이트하여 메모리 오버헤드를 최소화한다.
 
+또한 윈도우 단위의 국소적 분포 시프트(Covariate Shift)를 흡수하기 위해 **RevIN(Reversible Instance Normalization)**을 모델 내부에 장착한다. 연산 순서는 Raw Input → RevIN(정규화) → DLinear → RevIN Inverse(역정규화)이다. RevIN의 학습 가능한 affine 파라미터 $(\gamma_{RevIN}, \beta_{RevIN}​)$는 Catastrophic Forgetting 위험을 최소화하기 위해 TTA 과정에서 고정(Freeze)하며, $W_{trend}$​와 $W_{season}$​만을 업데이트 대상으로 한정한다.
+
 ### 2.2. 연합학습(FL) 구성 및 Non-IID 정량화
 각 컬럼(예: 개별 인버터, 가구)을 독립된 클라이언트로 취급한다. 클라이언트 간 데이터 분포의 이질성(Heterogeneity)은 **Wasserstein Distance**로 정량화하여, Non-IID 강도에 따른 제안 기법의 방어력을 입증한다. 로컬 과적합 방지를 위해 글로벌 서버 동기화 주기는 3 Epoch으로 설정한다.
 
@@ -27,7 +29,7 @@ DLinear의 고정된 입력 차원($L$)과 출력 차원($T$) 구조를 보존�
 
 $$L_{recon} = \frac{1}{k} \sum_{i=1}^{k} \| \hat{Y}_{i} - X_{recent, i} \|^2$$
 
-> **설계 제약:** 비교 대상인 $X_{recent}$의 길이 $k$는 반드시 모델의 출력 길이 $T$ 이하여야 한다 ($k \leq T$). 이 조건을 만족하지 않으면 예측값 $\hat{Y}$의 인덱스 범위를 초과하여 연산이 성립하지 않는다. 따라서 Ablation Study에서 $k$의 탐색 범위는 $\{T/4,\ T/2,\ T\}$로 제한한다. (예: $T=96$이면 $k \in \{24, 48, 96\}$)
+> **설계 제약:** 비교 대상인 $X_{recent}$의 길이 $k$는 반드시 모델의 출력 길이 $T$ 이하여야 한다 ($k \leq T$). 이 조건을 만족하지 않으면 예측값 $\hat{Y}$의 인덱스 범위를 초과하여 연산이 성립하지 않는다. 따라서 Ablation Study에서 $k$의 탐색 범위는 $\{T/4,\ T/2,\ T\}$로 제한한다. (예: $T=96$이면 $k \in \{24, 48, 96\}$) 또한 $L_{recon}$ 계산은 RevIN 역정규화 이후, 즉 Global Scale 공간에서 수행한다. $X_{input}$​과 $X_{recent}$​는 서로 다른 시점의 윈도우이므로 RevIN이 각기 다른 통계량으로 정규화하며, RevIN 공간 내에서 직접 비교하면 기저가 달라 손실값이 왜곡된다.
 
 **B. 연속적 동적 성분 보존 페널티 (Continuous Dynamic Penalty)**
 
@@ -41,7 +43,7 @@ $$\lambda_{trend} = \lambda_0 \cdot \exp\left(-\gamma \cdot \frac{|\mu_{curr} - 
 
 $$\lambda_{season} = \lambda_0 \cdot \exp\left(-\gamma \cdot \frac{|\sigma_{curr} - \sigma_{hist}|}{\sigma_{hist}}\right)$$
 
-> **수식 일관성 근거:** $\lambda_{trend}$는 평균의 편차를 $\sigma_{hist}$로 나누어 정규화한 z-score 형태를 사용한다. $\lambda_{season}$ 역시 분산이 아닌 **표준편차의 편차**($|\sigma_{curr} - \sigma_{hist}|$)를 동일한 $\sigma_{hist}$로 나누어, 두 계수가 동일한 스케일($[0, \infty)$)에서 작동하도록 통일한다.
+> **수식 일관성 근거:** $\lambda_{trend}$는 평균의 편차를 $\sigma_{hist}$로 나누어 정규화한 z-score 형태를 사용한다. $\lambda_{season}$ 역시 분산이 아닌 **표준편차의 편차**($|\sigma_{curr} - \sigma_{hist}|$)를 동일한 $\sigma_{hist}$로 나누어, 두 계수가 동일한 스케일($[0, \infty)$)에서 작동하도록 통일한다. 단, 통계량 $\mu_{curr}​, \sigma_{curr}​, \mu_{hist}​, \sigma_{hist}$​는 모두 Global Scaler 적용 후, RevIN 적용 전의 중간 표현에서 추출한다. RevIN 통과 후의 데이터는 항상 평균 0, 분산 1에 수렴하여 도메인 시프트 감지가 불가능하다.
 
 **C. 최종 목적 함수:**
 
@@ -56,10 +58,17 @@ $$L_{TTA} = L_{recon} + \alpha L_{reg}$$
 
 ## 3. 실험 및 검증 계획
 
-### 3.1. 데이터셋
-1. **자체 데이터셋 (Custom):** 15분 단위 데이터.
-2. **Solar 데이터셋:** 10분 단위 데이터.
-3. **Electricity 데이터셋:** 1시간 단위 데이터.
+### 3.1. 데이터셋 및 전처리 전략
+
+공정한 성능 평가 및 기존 벤치마크와의 비교를 위해 이중 정규화(Dual Normalization) 구조를 채택한다. 먼저 학습 데이터(Train Set) 기준으로 전역 표준 정규화(Global Standard Scaling)를 전체 데이터(Train/Val/Test)에 선행 적용한다. 제안 프레임워크는 이 글로벌 정규화 공간 위에서 동작하며, 모델 내부 RevIN이 윈도우 단위의 추가적 시프트를 흡수한다. 평가 지표는 다음 기준으로 측정한다.
+
+* MSE/MAE: RevIN 역정규화 직후(Global Scale 공간)에서 측정. 이 시점이 기존 벤치마크 논문들과 동일한 평가 공간이며 0.x 수준의 수치를 기대할 수 있다.
+* sMAPE: Global Scaler까지 완전히 역정규화한 원본 물리 단위에서 측정. 스케일 의존성이 없는 퍼센트 지표이므로 원본 단위에서 측정하는 것이 학술적으로 타당하다.
+
+활용 데이터셋은 다음과 같다.
+1. Murata: 15분 단위 데이터.
+2. Solar: 10분 단위 데이터.
+3. Electricity: 1시간 단위 데이터.
 
 ### 3.2. 비교군 (Baselines)
 1. **Centralized DLinear:** 전체 데이터 중앙 집중 학습 (Upper Bound).
