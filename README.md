@@ -30,27 +30,26 @@ cd /home/jylee/DLinear-Season-Trend
 ```
 ## Baseline 1: Centralized 학습
 ``` BASH
-$PYTHON scripts/run.py --config configs/solar/centralized.yaml
+$PYTHON -m scripts.run --config configs/solar/centralized.yaml
 ```
 
 ## Baseline 2: FedAvg 학습
 ``` BASH
-$PYTHON scripts/run.py --config configs/solar/fed.yaml
+$PYTHON -m scripts.run --config configs/solar/fed.yaml
 ```
 
 ## Baseline 3: Centralized 모델 + TTA
 ``` BASH
-$PYTHON scripts/run.py --config configs/solar/dlinear_tta.yaml \
+$PYTHON -m scripts.run --config configs/solar/dlinear_tta.yaml \
     --checkpoint-path checkpoints/solar_centralized/best.pt
 ```
 
 ## Baseline 4: FL 모델 + 일회성 TTA
 ``` BASH
-$PYTHON scripts/run.py --config configs/solar/fed_tta.yaml
+$PYTHON -m scripts.run --config configs/solar/fed_tta.yaml
 ```
 
 ## Baseline 5 (제안 기법): FED-TTA Loop
 ``` BASH
-$PYTHON scripts/run.py --config configs/solar/fed_tta_loop.yaml
+$PYTHON -m scripts.run --config configs/solar/fed_tta_loop.yaml
 ```
-

@@ -2,9 +2,9 @@
 Unified entry point for all 5 DLinear FED-TTA baselines.
 
 Usage:
-    python scripts/run.py --config configs/solar/fed_tta_loop.yaml
-    python scripts/run.py --config configs/electricity/centralized.yaml --device cpu
-    python scripts/run.py --config configs/solar/dlinear_tta.yaml \\
+    python -m scripts.run --config configs/solar/fed_tta_loop.yaml
+    python -m scripts.run --config configs/electricity/centralized.yaml --device cpu
+    python -m scripts.run --config configs/solar/dlinear_tta.yaml \\
         --checkpoint-path checkpoints/solar_centralized/best.pt
 
 The baseline is determined by the 'baseline' field in the YAML config.
