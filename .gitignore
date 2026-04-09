@@ -1,3 +1,5 @@
 backgrounds
 *.pyc
 __pycache__/
+runs/
+checkpoints/

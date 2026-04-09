@@ -11,7 +11,11 @@ from torch.utils.data import DataLoader
 from scripts.config import ExperimentConfig
 from scripts.data.dataset import ClientData, ClientDataset, CentralizedDataset
 from scripts.models.revin_dlinear import RevINDLinear
-from scripts.utils.tools import EarlyStopping, make_run_dir
+from scripts.utils.tools import (
+    build_checkpoint_metadata,
+    resolve_checkpoint_path,
+    write_checkpoint_metadata,
+)
 
 
 def _make_model(cfg: ExperimentConfig) -> RevINDLinear:
@@ -89,6 +93,7 @@ def run_fedavg(
     config: ExperimentConfig,
     clients: list[ClientData],
     device: torch.device | None = None,
+    checkpoint_path_override: str | Path | None = None,
 ) -> RevINDLinear:
     """
     Run FedAvg FL training for config.global_rounds rounds.
@@ -100,7 +105,12 @@ def run_fedavg(
         device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     global_model = _make_model(config).to(device)
-    ckpt_dir = Path(config.checkpoint_dir) / f"{config.dataset}_fed"
+    ckpt_path = resolve_checkpoint_path(
+        checkpoint_path_override,
+        config.checkpoint_dir,
+        config.dataset,
+        "fed",
+    )
     best_val_loss = float("inf")
 
     criterion = nn.MSELoss()
@@ -130,10 +140,11 @@ def run_fedavg(
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(global_model.state_dict(), ckpt_dir / "best.pt")
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(global_model.state_dict(), ckpt_path)
             print(f"  → Best model saved (val_loss={val_loss:.6f})")
 
     # Load best weights
-    global_model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device))
+    write_checkpoint_metadata(ckpt_path, build_checkpoint_metadata(config, "fed"))
+    global_model.load_state_dict(torch.load(ckpt_path, map_location=device))
     return global_model

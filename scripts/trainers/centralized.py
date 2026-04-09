@@ -1,7 +1,6 @@
 """Baseline 1: Centralized DLinear training (upper bound)."""
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 
 import torch
@@ -11,7 +10,12 @@ from torch.utils.data import DataLoader
 from scripts.config import ExperimentConfig
 from scripts.data.dataset import ClientData, CentralizedDataset
 from scripts.models.revin_dlinear import RevINDLinear
-from scripts.utils.tools import EarlyStopping, make_run_dir, save_results
+from scripts.utils.tools import (
+    EarlyStopping,
+    build_checkpoint_metadata,
+    resolve_checkpoint_path,
+    write_checkpoint_metadata,
+)
 
 
 def _make_model(cfg: ExperimentConfig, channels: int) -> RevINDLinear:
@@ -29,6 +33,7 @@ def run_centralized(
     config: ExperimentConfig,
     clients: list[ClientData],
     device: torch.device | None = None,
+    checkpoint_path_override: str | Path | None = None,
 ) -> RevINDLinear:
     """
     Pool all clients into one dataset and train a single DLinear model.
@@ -36,7 +41,7 @@ def run_centralized(
     All clients are single-channel (shape [N, 1]), so channels=1.
     The model is shared across all clients via the centralized dataset.
 
-    Saves best checkpoint to {checkpoint_dir}/{dataset}_centralized/best.pt.
+    Saves best checkpoint to {checkpoint_dir}/{dataset}_centralized/best.pt unless overridden.
     Returns the best model (loaded from checkpoint).
     """
     if device is None:
@@ -52,7 +57,12 @@ def run_centralized(
     train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0)
 
-    ckpt_dir = Path(config.checkpoint_dir) / f"{config.dataset}_centralized"
+    ckpt_path = resolve_checkpoint_path(
+        checkpoint_path_override,
+        config.checkpoint_dir,
+        config.dataset,
+        "centralized",
+    )
     early_stop = EarlyStopping(patience=config.patience)
 
     for epoch in range(1, config.epochs + 1):
@@ -80,11 +90,12 @@ def run_centralized(
         print(f"[Centralized] Epoch {epoch:3d}/{config.epochs} | "
               f"train_loss={train_loss:.6f}  val_loss={val_loss:.6f}")
 
-        early_stop(val_loss, model, ckpt_dir)
+        early_stop(val_loss, model, ckpt_path)
         if early_stop.early_stop:
             print(f"[Centralized] Early stopping at epoch {epoch}.")
             break
 
     # Load best weights
-    model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device))
+    write_checkpoint_metadata(ckpt_path, build_checkpoint_metadata(config, "centralized"))
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
     return model

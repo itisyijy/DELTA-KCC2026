@@ -45,6 +45,8 @@ cd /home/jylee/DLinear-Season-Trend
 
 `dlinear_tta`, `fed_tta`, `fed_tta_loop`는 현재 config와 동일한 `seq_len/pred_len`로 다시 학습한 체크포인트를 사용해야 합니다. 예전 `96 -> 96` 체크포인트는 그대로 재사용할 수 없습니다.
 
+`--auto-prereq`를 사용하면 TTA 계열 baseline 실행 시 필요한 선행 체크포인트를 자동으로 검증합니다. 체크포인트가 없거나, sidecar metadata(`best.pt.meta.json`) 기준으로 현재 prerequisite config와 맞지 않으면 해당 prerequisite baseline을 먼저 다시 학습한 뒤 이어서 실행합니다.
+
 모든 실행 예시는 기본적으로 `tmux` detached session 기준입니다.
 
 ``` BASH
@@ -98,6 +100,12 @@ tmux new-session -d -s murata_dlinear_tta \
     "$PYTHON -m scripts.run --config configs/murata/dlinear_tta.yaml --checkpoint-path checkpoints/murata_centralized/best.pt"
 ```
 
+``` BASH
+# checkpoint가 없거나 mismatch면 centralized를 먼저 다시 학습
+tmux new-session -d -s murata_dlinear_tta_auto \
+    "$PYTHON -m scripts.run --config configs/murata/dlinear_tta.yaml --auto-prereq"
+```
+
 ## Baseline 4: FL 모델 + 일회성 TTA
 ``` BASH
 # solar
@@ -113,6 +121,12 @@ tmux new-session -d -s murata_fed_tta \
     "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
 ```
 
+``` BASH
+# checkpoint가 없거나 mismatch면 fed를 먼저 다시 학습
+tmux new-session -d -s murata_fed_tta_auto \
+    "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --auto-prereq"
+```
+
 ## Baseline 5 (제안 기법): FED-TTA Loop
 ``` BASH
 # solar
@@ -126,4 +140,10 @@ tmux new-session -d -s electricity_fed_tta_loop \
 # murata
 tmux new-session -d -s murata_fed_tta_loop \
     "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
+```
+
+``` BASH
+# checkpoint가 없거나 mismatch면 fed를 먼저 다시 학습
+tmux new-session -d -s murata_fed_tta_loop_auto \
+    "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml --auto-prereq"
 ```

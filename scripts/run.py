@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from scripts.checkpoints import TTA_PREREQ_BASELINES, load_model, resolve_or_build_prereq_checkpoint
 from scripts.config import ExperimentConfig, load_config
 from scripts.data.dataset import ClientData
 from scripts.data.loader import load_csv_as_clients, load_parquet_as_clients
@@ -34,7 +35,7 @@ from scripts.tta.engine import (
 from scripts.tta.loop import run_fed_tta_loop
 from scripts.tta.loss import TTALoss
 from scripts.utils.metrics import mse, mae, smape, inverse_global_scale, wasserstein_noniid
-from scripts.utils.tools import seed_everything, make_run_dir, save_results
+from scripts.utils.tools import make_run_dir, save_results, seed_everything
 
 
 def _load_clients(config: ExperimentConfig) -> list[ClientData]:
@@ -60,23 +61,6 @@ def _load_clients(config: ExperimentConfig) -> list[ClientData]:
         raise ValueError(f"Unknown data_format: {config.data_format!r}")
 
 
-def _load_model(config: ExperimentConfig, device: torch.device) -> RevINDLinear:
-    """Load a pre-trained model from checkpoint_path."""
-    if not config.checkpoint_path:
-        raise ValueError("checkpoint_path must be set for TTA baselines.")
-    model = RevINDLinear(
-        seq_len=config.model.seq_len,
-        pred_len=config.model.pred_len,
-        channels=1,
-        kernel_size=config.model.kernel_size,
-        individual=config.model.individual,
-        revin_affine=config.model.revin_affine,
-    ).to(device)
-    state = torch.load(config.checkpoint_path, map_location=device)
-    model.load_state_dict(state)
-    return model
-
-
 def _aggregate_metrics(per_client: dict[str, dict[str, float]]) -> dict[str, float]:
     """Average per-client metrics (skip NaN clients)."""
     keys = ["mse", "mae", "smape"]
@@ -93,9 +77,14 @@ def _aggregate_metrics(per_client: dict[str, dict[str, float]]) -> dict[str, flo
 # Baseline runners
 # ---------------------------------------------------------------------------
 
-def run_baseline_centralized(config: ExperimentConfig, clients: list[ClientData],
-                              device: torch.device, run_dir: Path) -> None:
-    model = run_centralized(config, clients, device)
+def run_baseline_centralized(
+    config: ExperimentConfig,
+    clients: list[ClientData],
+    device: torch.device,
+    run_dir: Path,
+    checkpoint_path_override: str | Path | None = None,
+) -> None:
+    model = run_centralized(config, clients, device, checkpoint_path_override=checkpoint_path_override)
     per_client = {c.client_id: evaluate_client(
         model=model, client=c,
         seq_len=config.model.seq_len, pred_len=config.model.pred_len, device=device,
@@ -106,9 +95,14 @@ def run_baseline_centralized(config: ExperimentConfig, clients: list[ClientData]
                  dataclasses.asdict(config))
 
 
-def run_baseline_fed(config: ExperimentConfig, clients: list[ClientData],
-                     device: torch.device, run_dir: Path) -> None:
-    model = run_fedavg(config, clients, device)
+def run_baseline_fed(
+    config: ExperimentConfig,
+    clients: list[ClientData],
+    device: torch.device,
+    run_dir: Path,
+    checkpoint_path_override: str | Path | None = None,
+) -> None:
+    model = run_fedavg(config, clients, device, checkpoint_path_override=checkpoint_path_override)
     per_client = {c.client_id: evaluate_client(
         model=model, client=c,
         seq_len=config.model.seq_len, pred_len=config.model.pred_len, device=device,
@@ -201,21 +195,36 @@ def _run_tta_eval(
                  dataclasses.asdict(config))
 
 
-def run_baseline_dlinear_tta(config: ExperimentConfig, clients: list[ClientData],
-                              device: torch.device, run_dir: Path) -> None:
-    model = _load_model(config, device)
+def run_baseline_dlinear_tta(
+    config: ExperimentConfig,
+    clients: list[ClientData],
+    device: torch.device,
+    run_dir: Path,
+    checkpoint_path_override: str | Path | None = None,
+) -> None:
+    model = load_model(config, device)
     _run_tta_eval(config, clients, model, device, run_dir, label="DLinear-TTA")
 
 
-def run_baseline_fed_tta(config: ExperimentConfig, clients: list[ClientData],
-                          device: torch.device, run_dir: Path) -> None:
-    model = _load_model(config, device)
+def run_baseline_fed_tta(
+    config: ExperimentConfig,
+    clients: list[ClientData],
+    device: torch.device,
+    run_dir: Path,
+    checkpoint_path_override: str | Path | None = None,
+) -> None:
+    model = load_model(config, device)
     _run_tta_eval(config, clients, model, device, run_dir, label="FED-TTA")
 
 
-def run_baseline_fed_tta_loop(config: ExperimentConfig, clients: list[ClientData],
-                               device: torch.device, run_dir: Path) -> None:
-    model = _load_model(config, device)
+def run_baseline_fed_tta_loop(
+    config: ExperimentConfig,
+    clients: list[ClientData],
+    device: torch.device,
+    run_dir: Path,
+    checkpoint_path_override: str | Path | None = None,
+) -> None:
+    model = load_model(config, device)
     k = config.k()
     per_client = run_fed_tta_loop(
         global_model=model,
@@ -269,6 +278,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-clients", type=int, default=None, dest="max_clients",
                         help="Override max_clients in config")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--auto-prereq", action="store_true",
+                        help="Automatically build or refresh prerequisite checkpoints for TTA baselines")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -292,6 +303,8 @@ def main(argv: list[str] | None = None) -> None:
         config = dataclasses.replace(config, max_clients=args.max_clients)
     if args.seed is not None:
         config = dataclasses.replace(config, seed=args.seed)
+    if args.auto_prereq and config.baseline not in TTA_PREREQ_BASELINES:
+        parser.error("--auto-prereq is only supported for dlinear_tta, fed_tta, and fed_tta_loop")
 
     seed_everything(config.seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -302,8 +315,6 @@ def main(argv: list[str] | None = None) -> None:
     clients = _load_clients(config)
     print(f"  Loaded {len(clients)} clients.")
 
-    run_dir = make_run_dir(config.output_dir, config.dataset, config.baseline)
-
     runner = BASELINE_RUNNERS.get(config.baseline)
     if runner is None:
         raise ValueError(
@@ -311,6 +322,17 @@ def main(argv: list[str] | None = None) -> None:
             f"Choose from: {list(BASELINE_RUNNERS)}"
         )
 
+    if config.baseline in TTA_PREREQ_BASELINES:
+        config = resolve_or_build_prereq_checkpoint(
+            config=config,
+            config_path=args.config,
+            clients=clients,
+            device=device,
+            auto_prereq=args.auto_prereq,
+            baseline_runners=BASELINE_RUNNERS,
+        )
+
+    run_dir = make_run_dir(config.output_dir, config.dataset, config.baseline)
     runner(config, clients, device, run_dir)
 
 
