@@ -6,11 +6,13 @@ data_path: /home/jylee/datasets/archive/murata_15min_legacy_full/manifest.json
 parquet_clients_dir: /home/jylee/datasets/archive/murata_15min_legacy_full/clients
 
 model:
-  seq_len: 96        # 96 × 15min = 24 hours
+  seq_len: 192       # 192 × 15min = 48 hours input context
   pred_len: 96
   kernel_size: 25
   individual: false
   revin_affine: true
+
+batch_size: 256
 
 # Path to trained centralized model checkpoint
 checkpoint_path: checkpoints/murata_centralized/best.pt
@@ -25,7 +27,7 @@ tta:
   rollback_threshold: 3.0
   rollback_window: 20
 
-device: cuda:0
+device: cuda:1
 seed: 0
 output_dir: runs
 checkpoint_dir: checkpoints

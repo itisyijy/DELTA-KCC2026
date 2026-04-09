@@ -5,11 +5,13 @@ data_path: /home/jylee/datasets/electricity.csv
 timestamp_col: date
 
 model:
-  seq_len: 96
+  seq_len: 336
   pred_len: 96
   kernel_size: 25
   individual: false
   revin_affine: true
+
+batch_size: 256
 
 # Path to trained FL model checkpoint
 checkpoint_path: checkpoints/electricity_fed/best.pt
@@ -24,7 +26,7 @@ tta:
   rollback_threshold: 3.0
   rollback_window: 20
 
-device: cuda:0
+device: cuda:1
 seed: 0
 output_dir: runs
 checkpoint_dir: checkpoints

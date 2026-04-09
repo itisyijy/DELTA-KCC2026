@@ -29,6 +29,18 @@ PYTHON=/home/jylee/miniconda3/envs/kcc2026/bin/python
 cd /home/jylee/DLinear-Season-Trend
 ```
 
+현재 기본 config는 모두 `cuda:1`을 사용합니다.
+
+- `batch_size: 256`
+- `epochs: 15` for centralized
+- `global_rounds: 15` for federated baselines
+- dataset-specific `seq_len`
+- `solar`: `288 -> 96` (`48h -> 16h`)
+- `murata`: `192 -> 96` (`48h -> 24h`)
+- `electricity`: `336 -> 96` (`14d -> 4d`)
+
+`dlinear_tta`, `fed_tta`, `fed_tta_loop`는 현재 config와 동일한 `seq_len/pred_len`로 다시 학습한 체크포인트를 사용해야 합니다. 예전 `96 -> 96` 체크포인트는 그대로 재사용할 수 없습니다.
+
 모든 실행 예시는 기본적으로 `tmux` detached session 기준입니다.
 
 ``` BASH
@@ -53,16 +65,13 @@ tmux new-session -d -s murata_centralized \
 ```
 
 ``` BASH
-# 짧은 실험 예시: solar fed를 라운드 줄여서 실행
-tmux new-session -d -s solar_fed_seed0 \
-    "$PYTHON -m scripts.run --config configs/solar/fed.yaml --seed 0 --global-rounds 10 --local-epochs 1 --output-dir runs/bg_solar_fed_seed0 --checkpoint-dir checkpoints/bg_solar_fed_seed0"
+# 짧은 실험 예시: solar fed를 더 짧게 실행
+tmux new-session -d -s solar_fed_quick \
+    "$PYTHON -m scripts.run --config configs/solar/fed.yaml --seed 0 --global-rounds 8 --local-epochs 1 --output-dir runs/quick_solar_fed --checkpoint-dir checkpoints/quick_solar_fed"
 
-# 같은 seed 유지, 다른 실험 2개를 동시에 실행하는 예시
-tmux new-session -d -s solar_centralized_seed0 \
-    "$PYTHON -m scripts.run --config configs/solar/centralized.yaml --seed 0 --epochs 10 --output-dir runs/bg_solar_centralized_seed0 --checkpoint-dir checkpoints/bg_solar_centralized_seed0"
-
-tmux new-session -d -s solar_fed_seed0_short \
-    "$PYTHON -m scripts.run --config configs/solar/fed.yaml --seed 0 --global-rounds 10 --local-epochs 1 --output-dir runs/bg_solar_fed_seed0_short --checkpoint-dir checkpoints/bg_solar_fed_seed0_short"
+# centralized quick sanity check
+tmux new-session -d -s solar_centralized_quick \
+    "$PYTHON -m scripts.run --config configs/solar/centralized.yaml --seed 0 --epochs 8 --output-dir runs/quick_solar_centralized --checkpoint-dir checkpoints/quick_solar_centralized"
 ```
 
 ## Baseline 2: FedAvg 학습
@@ -99,28 +108,28 @@ tmux new-session -d -s murata_dlinear_tta \
 ``` BASH
 # solar
 tmux new-session -d -s solar_fed_tta \
-    "$PYTHON -m scripts.run --config configs/solar/fed_tta.yaml"
+    "$PYTHON -m scripts.run --config configs/solar/fed_tta.yaml --checkpoint-path checkpoints/solar_fed/best.pt"
 
 # electricity
 tmux new-session -d -s electricity_fed_tta \
-    "$PYTHON -m scripts.run --config configs/electricity/fed_tta.yaml"
+    "$PYTHON -m scripts.run --config configs/electricity/fed_tta.yaml --checkpoint-path checkpoints/electricity_fed/best.pt"
 
 # murata
 tmux new-session -d -s murata_fed_tta \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml"
+    "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
 ```
 
 ## Baseline 5 (제안 기법): FED-TTA Loop
 ``` BASH
 # solar
 tmux new-session -d -s solar_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/solar/fed_tta_loop.yaml"
+    "$PYTHON -m scripts.run --config configs/solar/fed_tta_loop.yaml --checkpoint-path checkpoints/solar_fed/best.pt"
 
 # electricity
 tmux new-session -d -s electricity_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/electricity/fed_tta_loop.yaml"
+    "$PYTHON -m scripts.run --config configs/electricity/fed_tta_loop.yaml --checkpoint-path checkpoints/electricity_fed/best.pt"
 
 # murata
 tmux new-session -d -s murata_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml"
+    "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
 ```
