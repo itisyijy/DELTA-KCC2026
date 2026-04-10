@@ -49,11 +49,10 @@ cd /home/jylee/DLinear-Season-Trend
 
 ## 현재 상태 메모
 
-`fed_tta_loop`는 2026-04-10 기준으로 안정화 작업이 필요한 상태입니다.
+`fed_tta_loop` 발산 버그 수정 완료 (2026-04-11, `scripts/tta/loop.py`).
 
-- 현재 구현은 server feedback에 누적 delta를 주입하는 구조라 장기 test horizon에서 발산할 수 있습니다.
-- 실제 run 결과에서도 `fed_tta_loop`만 `fed_tta`/`dlinear_tta` 대비 비정상적으로 큰 MSE를 보였습니다.
-- 따라서 현재 `Baseline 5` 결과는 최종 비교 실험에 사용하지 말고, 디버깅 및 안정화 검증용으로만 사용해야 합니다.
+- **원인**: 서버 피드백 후 anchor가 갱신되지 않아 delta = `W_current - W_original` (누적 drift 전체)이 됐고, 매 스텝마다 이미 반영된 drift를 0.9배로 재적용하는 양의 피드백 루프로 MSE가 (1.9)ⁿ 급수로 발산.
+- **수정**: broadcast 시 `client_anchors`를 새 global weights로 갱신 + `optimizer.state.clear()`로 stale Adam 모멘텀 초기화.
 
 모든 실행 예시는 기본적으로 `tmux` detached session 기준입니다.
 
@@ -135,9 +134,7 @@ tmux new-session -d -s murata_fed_tta_auto \
     "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --auto-prereq"
 ```
 
-## Baseline 5 (안정화 필요): FED-TTA Loop
-
-현재 섹션의 실행 명령은 재현 및 디버깅 용도입니다. `fed_tta_loop`는 아직 안정화 전이므로, 결과가 발산하면 구현 이슈로 해석해야 하며 성능 비교 결론에 포함하면 안 됩니다.
+## Baseline 5: FED-TTA Loop
 
 ``` BASH
 # solar
