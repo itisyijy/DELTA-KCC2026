@@ -1,45 +1,20 @@
-"""
-Unified entry point for all 5 DLinear FED-TTA baselines.
-
-Usage:
-    python -m scripts.run --config configs/solar/fed_tta_loop.yaml
-    python -m scripts.run --config configs/electricity/centralized.yaml --device cpu
-    python -m scripts.run --config configs/solar/dlinear_tta.yaml \\
-        --checkpoint-path checkpoints/solar_centralized/best.pt
-
-The baseline is determined by the 'baseline' field in the YAML config.
-Results are saved to runs/{timestamp}_{dataset}_{baseline}/metrics.json.
-"""
 from __future__ import annotations
 
-import argparse
-import copy
-import dataclasses
 from pathlib import Path
 
-import numpy as np
 import torch
 
-from scripts.checkpoints import TTA_PREREQ_BASELINES, load_model, resolve_or_build_prereq_checkpoint
+from scripts.baselines import BASELINE_RUNNERS
+from scripts.checkpoints import TTA_PREREQ_BASELINES, resolve_or_build_prereq_checkpoint
+from scripts.cli import apply_cli_overrides, build_parser
 from scripts.config import ExperimentConfig, load_config
 from scripts.data.dataset import ClientData
 from scripts.data.loader import load_csv_as_clients, load_parquet_as_clients
-from scripts.models.revin_dlinear import RevINDLinear
-from scripts.trainers.centralized import run_centralized
-from scripts.trainers.fedavg import run_fedavg
-from scripts.tta.adapter import prepare_tta_model
-from scripts.tta.engine import (
-    RollbackGuard, ReconTracker,
-    build_hindcast_inputs, evaluate_client, run_tta_step,
-)
-from scripts.tta.loop import run_fed_tta_loop
-from scripts.tta.loss import TTALoss
-from scripts.utils.metrics import mse, mae, smape, inverse_global_scale, wasserstein_noniid
-from scripts.utils.tools import make_run_dir, save_results, seed_everything
+from scripts.utils.run_logging import tee_run_output
+from scripts.utils.tools import make_run_dir, seed_everything
 
 
 def _load_clients(config: ExperimentConfig) -> list[ClientData]:
-    """Load clients according to data_format in config."""
     if config.data_format == "csv":
         return load_csv_as_clients(
             csv_path=config.data_path,
@@ -48,7 +23,7 @@ def _load_clients(config: ExperimentConfig) -> list[ClientData]:
             pred_len=config.model.pred_len,
             max_clients=config.max_clients,
         )
-    elif config.data_format == "parquet":
+    if config.data_format == "parquet":
         clients_dir = config.parquet_clients_dir or str(Path(config.data_path).parent / "clients")
         return load_parquet_as_clients(
             manifest_path=config.data_path,
@@ -57,283 +32,38 @@ def _load_clients(config: ExperimentConfig) -> list[ClientData]:
             pred_len=config.model.pred_len,
             max_clients=config.max_clients,
         )
-    else:
-        raise ValueError(f"Unknown data_format: {config.data_format!r}")
-
-
-def _aggregate_metrics(per_client: dict[str, dict[str, float]]) -> dict[str, float]:
-    """Average per-client metrics (skip NaN clients)."""
-    keys = ["mse", "mae", "smape"]
-    agg: dict[str, list[float]] = {k: [] for k in keys}
-    for m in per_client.values():
-        for k in keys:
-            v = m.get(k, float("nan"))
-            if not np.isnan(v):
-                agg[k].append(v)
-    return {k: float(np.mean(v)) if v else float("nan") for k, v in agg.items()}
-
-
-# ---------------------------------------------------------------------------
-# Baseline runners
-# ---------------------------------------------------------------------------
-
-def run_baseline_centralized(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    device: torch.device,
-    run_dir: Path,
-    checkpoint_path_override: str | Path | None = None,
-) -> None:
-    model = run_centralized(config, clients, device, checkpoint_path_override=checkpoint_path_override)
-    per_client = {c.client_id: evaluate_client(
-        model=model, client=c,
-        seq_len=config.model.seq_len, pred_len=config.model.pred_len, device=device,
-    ) for c in clients}
-    avg = _aggregate_metrics(per_client)
-    print(f"\n[Centralized] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  sMAPE={avg['smape']:.2f}%")
-    save_results(run_dir, {"per_client": per_client, "avg": avg},
-                 dataclasses.asdict(config))
-
-
-def run_baseline_fed(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    device: torch.device,
-    run_dir: Path,
-    checkpoint_path_override: str | Path | None = None,
-) -> None:
-    model = run_fedavg(config, clients, device, checkpoint_path_override=checkpoint_path_override)
-    per_client = {c.client_id: evaluate_client(
-        model=model, client=c,
-        seq_len=config.model.seq_len, pred_len=config.model.pred_len, device=device,
-    ) for c in clients}
-    avg = _aggregate_metrics(per_client)
-    wd = wasserstein_noniid(clients)
-    print(f"\n[FED] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  "
-          f"sMAPE={avg['smape']:.2f}%  Non-IID(W)={wd:.4f}")
-    save_results(run_dir, {"per_client": per_client, "avg": avg, "wasserstein_noniid": wd},
-                 dataclasses.asdict(config))
-
-
-def _run_tta_eval(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    model: RevINDLinear,
-    device: torch.device,
-    run_dir: Path,
-    label: str,
-) -> None:
-    """Shared TTA evaluation loop for dlinear_tta and fed_tta (no server feedback)."""
-    k = config.k()
-    tta_loss_fn = TTALoss(
-        k=k,
-        alpha=config.tta.alpha,
-        lambda0=config.tta.lambda0,
-        gamma=config.tta.gamma,
-    )
-
-    per_client: dict[str, dict[str, float]] = {}
-    for client in clients:
-        cm = copy.deepcopy(model).to(device)
-        cm, anchor_t, anchor_s = prepare_tta_model(cm)
-        tta_params = [p for p in cm.dlinear.parameters() if p.requires_grad]
-        optimizer = torch.optim.Adam(tta_params, lr=config.tta.lr)
-        tracker = ReconTracker(window_size=config.tta.rollback_window)
-        guard = RollbackGuard(threshold=config.tta.rollback_threshold, tracker=tracker)
-
-        test_s, test_e = client.split_indices["test"]
-        preds_g, targets_g = [], []
-
-        for t_abs in range(test_s + config.model.seq_len + k - 1, test_e):
-            inputs = build_hindcast_inputs(client.values, t_abs, config.model.seq_len, k)
-            if inputs is None:
-                continue
-            x_input, x_recent = inputs
-
-            run_tta_step(
-                model=cm, optimizer=optimizer, tta_loss_fn=tta_loss_fn,
-                anchor_trend_w=anchor_t, anchor_season_w=anchor_s,
-                x_input=x_input, x_recent=x_recent,
-                mu_hist=client.global_mean, sigma_hist=max(client.global_std, 1e-8),
-                rollback_guard=guard, device=device, grad_clip=config.tta.grad_clip,
-            )
-
-            # Standard prediction window
-            pred_start = t_abs - config.model.seq_len + 1
-            if pred_start >= 0 and pred_start + config.model.seq_len <= len(client.values):
-                x_np = client.values[pred_start : pred_start + config.model.seq_len]
-                x_t = torch.from_numpy(x_np).unsqueeze(0).to(device)
-                cm.eval()
-                with torch.no_grad():
-                    pred = cm(x_t).cpu().numpy()[0]
-                cm.train()
-                target = client.values[
-                    pred_start + config.model.seq_len :
-                    pred_start + config.model.seq_len + config.model.pred_len
-                ]
-                if len(target) == config.model.pred_len:
-                    preds_g.append(pred)
-                    targets_g.append(target)
-
-        if preds_g:
-            pg = np.concatenate(preds_g, axis=0)
-            tg = np.concatenate(targets_g, axis=0)
-            po = inverse_global_scale(pg, client.global_mean, client.global_std)
-            to_ = inverse_global_scale(tg, client.global_mean, client.global_std)
-            per_client[client.client_id] = {
-                "mse": mse(pg, tg), "mae": mae(pg, tg), "smape": smape(po, to_),
-            }
-        else:
-            per_client[client.client_id] = {
-                "mse": float("nan"), "mae": float("nan"), "smape": float("nan"),
-            }
-
-    avg = _aggregate_metrics(per_client)
-    print(f"\n[{label}] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  "
-          f"sMAPE={avg['smape']:.2f}%")
-    save_results(run_dir, {"per_client": per_client, "avg": avg},
-                 dataclasses.asdict(config))
-
-
-def run_baseline_dlinear_tta(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    device: torch.device,
-    run_dir: Path,
-    checkpoint_path_override: str | Path | None = None,
-) -> None:
-    model = load_model(config, device)
-    _run_tta_eval(config, clients, model, device, run_dir, label="DLinear-TTA")
-
-
-def run_baseline_fed_tta(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    device: torch.device,
-    run_dir: Path,
-    checkpoint_path_override: str | Path | None = None,
-) -> None:
-    model = load_model(config, device)
-    _run_tta_eval(config, clients, model, device, run_dir, label="FED-TTA")
-
-
-def run_baseline_fed_tta_loop(
-    config: ExperimentConfig,
-    clients: list[ClientData],
-    device: torch.device,
-    run_dir: Path,
-    checkpoint_path_override: str | Path | None = None,
-) -> None:
-    model = load_model(config, device)
-    k = config.k()
-    per_client = run_fed_tta_loop(
-        global_model=model,
-        clients=clients,
-        seq_len=config.model.seq_len,
-        pred_len=config.model.pred_len,
-        k=k,
-        tta_config=config.tta,
-        feedback_config=config.feedback,
-        device=device,
-    )
-    avg = _aggregate_metrics(per_client)
-    wd = wasserstein_noniid(clients)
-    print(f"\n[FED-TTA Loop] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  "
-          f"sMAPE={avg['smape']:.2f}%  Non-IID(W)={wd:.4f}")
-    save_results(run_dir, {"per_client": per_client, "avg": avg, "wasserstein_noniid": wd},
-                 dataclasses.asdict(config))
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-BASELINE_RUNNERS = {
-    "centralized":   run_baseline_centralized,
-    "fed":           run_baseline_fed,
-    "dlinear_tta":   run_baseline_dlinear_tta,
-    "fed_tta":       run_baseline_fed_tta,
-    "fed_tta_loop":  run_baseline_fed_tta_loop,
-}
+    raise ValueError(f"Unknown data_format: {config.data_format!r}")
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        description="DLinear FED-TTA — unified experiment runner"
-    )
-    parser.add_argument("--config", required=True, help="Path to YAML config file")
-    parser.add_argument("--device", default=None, help="Override device (e.g. cpu, cuda:1)")
-    parser.add_argument("--checkpoint-path", default=None, dest="checkpoint_path",
-                        help="Override checkpoint_path in config (for TTA baselines)")
-    parser.add_argument("--output-dir", default=None, dest="output_dir",
-                        help="Override output_dir in config")
-    parser.add_argument("--checkpoint-dir", default=None, dest="checkpoint_dir",
-                        help="Override checkpoint_dir in config")
-    parser.add_argument("--epochs", type=int, default=None,
-                        help="Override epochs in config (centralized baselines)")
-    parser.add_argument("--global-rounds", type=int, default=None, dest="global_rounds",
-                        help="Override global_rounds in config (federated baselines)")
-    parser.add_argument("--local-epochs", type=int, default=None, dest="local_epochs",
-                        help="Override local_epochs in config (federated baselines)")
-    parser.add_argument("--max-clients", type=int, default=None, dest="max_clients",
-                        help="Override max_clients in config")
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--auto-prereq", action="store_true",
-                        help="Automatically build or refresh prerequisite checkpoints for TTA baselines")
+    parser = build_parser()
     args = parser.parse_args(argv)
-
-    config = load_config(args.config)
-
-    # CLI overrides
-    if args.device is not None:
-        config = dataclasses.replace(config, device=args.device)
-    if args.checkpoint_path is not None:
-        config = dataclasses.replace(config, checkpoint_path=args.checkpoint_path)
-    if args.output_dir is not None:
-        config = dataclasses.replace(config, output_dir=args.output_dir)
-    if args.checkpoint_dir is not None:
-        config = dataclasses.replace(config, checkpoint_dir=args.checkpoint_dir)
-    if args.epochs is not None:
-        config = dataclasses.replace(config, epochs=args.epochs)
-    if args.global_rounds is not None:
-        config = dataclasses.replace(config, global_rounds=args.global_rounds)
-    if args.local_epochs is not None:
-        config = dataclasses.replace(config, local_epochs=args.local_epochs)
-    if args.max_clients is not None:
-        config = dataclasses.replace(config, max_clients=args.max_clients)
-    if args.seed is not None:
-        config = dataclasses.replace(config, seed=args.seed)
-    if args.auto_prereq and config.baseline not in TTA_PREREQ_BASELINES:
-        parser.error("--auto-prereq is only supported for dlinear_tta, fed_tta, and fed_tta_loop")
-
+    config = apply_cli_overrides(load_config(args.config), args, parser)
     seed_everything(config.seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
-
-    print(f"=== DLinear FED-TTA | baseline={config.baseline} | dataset={config.dataset} ===")
-    print(f"  device={device}  seed={config.seed}")
-
-    clients = _load_clients(config)
-    print(f"  Loaded {len(clients)} clients.")
-
+    run_dir = make_run_dir(config.output_dir, config.dataset, config.baseline)
     runner = BASELINE_RUNNERS.get(config.baseline)
     if runner is None:
         raise ValueError(
-            f"Unknown baseline: {config.baseline!r}. "
-            f"Choose from: {list(BASELINE_RUNNERS)}"
+            f"Unknown baseline: {config.baseline!r}. Choose from: {list(BASELINE_RUNNERS)}"
         )
-
-    if config.baseline in TTA_PREREQ_BASELINES:
-        config = resolve_or_build_prereq_checkpoint(
-            config=config,
-            config_path=args.config,
-            clients=clients,
-            device=device,
-            auto_prereq=args.auto_prereq,
-            baseline_runners=BASELINE_RUNNERS,
-        )
-
-    run_dir = make_run_dir(config.output_dir, config.dataset, config.baseline)
-    runner(config, clients, device, run_dir)
+    with tee_run_output(run_dir) as log_path:
+        print(f"=== DLinear FED-TTA | baseline={config.baseline} | dataset={config.dataset} ===")
+        print(f"  device={device}  seed={config.seed}")
+        print(f"  run_dir={run_dir}")
+        print(f"  run_log={log_path}")
+        clients = _load_clients(config)
+        print(f"  Loaded {len(clients)} clients.")
+        if config.baseline in TTA_PREREQ_BASELINES:
+            config = resolve_or_build_prereq_checkpoint(
+                config=config,
+                config_path=args.config,
+                clients=clients,
+                device=device,
+                auto_prereq=args.auto_prereq,
+                baseline_runners=BASELINE_RUNNERS,
+            )
+        runner(config, clients, device, run_dir)
 
 
 if __name__ == "__main__":

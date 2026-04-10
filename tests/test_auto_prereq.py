@@ -10,7 +10,11 @@ import torch
 from scripts.checkpoints import make_model, resolve_or_build_prereq_checkpoint
 from scripts.config import load_config
 from scripts.run import BASELINE_RUNNERS, main
-from scripts.utils.tools import build_checkpoint_metadata, checkpoint_metadata_path
+from scripts.utils.tools import (
+    build_checkpoint_metadata,
+    checkpoint_metadata_path,
+    resolve_checkpoint_path,
+)
 
 
 def _write(path: Path, body: str) -> None:
@@ -20,53 +24,68 @@ def _write(path: Path, body: str) -> None:
 
 def _fed_case(tmp_path: Path, checkpoint_path: Path | None = None) -> tuple[Path, object, object, Path]:
     config_dir = tmp_path / "configs" / "toy"
-    common = f"""
-    dataset: toy
-    data_path: {tmp_path / "toy.csv"}
-    data_format: csv
-    timestamp_col: date
-    model:
-      seq_len: 4
-      pred_len: 2
-      kernel_size: 3
-      individual: false
-      revin_affine: true
-    batch_size: 8
-    lr: 0.001
-    device: cpu
-    seed: 0
-    output_dir: {tmp_path / "runs"}
-    checkpoint_dir: {tmp_path / "checkpoints"}
-    """
+    common = textwrap.dedent(
+        f"""
+        dataset: toy
+        data_path: {tmp_path / "toy.csv"}
+        data_format: csv
+        timestamp_col: date
+        model:
+          seq_len: 4
+          pred_len: 2
+          kernel_size: 3
+          individual: false
+          revin_affine: true
+        batch_size: 8
+        lr: 0.001
+        device: cpu
+        seed: 0
+        output_dir: {tmp_path / "runs"}
+        checkpoint_dir: {tmp_path / "checkpoints"}
+        """
+    ).strip()
     _write(
         config_dir / "fed.yaml",
-        f"""
-        baseline: fed
-        {common}
-        local_epochs: 1
-        global_rounds: 1
-        """,
+        "\n".join(
+            [
+                "baseline: fed",
+                common,
+                "local_epochs: 1",
+                "global_rounds: 1",
+            ]
+        ),
     )
-    checkpoint_line = f"checkpoint_path: {checkpoint_path}\n" if checkpoint_path else ""
     tta_path = config_dir / "fed_tta.yaml"
+    tta_lines = ["baseline: fed_tta", common]
+    if checkpoint_path:
+        tta_lines.append(f"checkpoint_path: {checkpoint_path}")
+    tta_lines.extend(
+        [
+            "tta:",
+            "  k_ratio: 0.5",
+            "  alpha: 1.0",
+            "  lambda0: 1.0",
+            "  gamma: 1.0",
+            "  lr: 0.001",
+            "  grad_clip: 1.0",
+            "  rollback_threshold: 3.0",
+            "  rollback_window: 2",
+        ]
+    )
     _write(
         tta_path,
-        f"""
-        baseline: fed_tta
-        {common}
-        {checkpoint_line}tta:
-          k_ratio: 0.5
-          alpha: 1.0
-          lambda0: 1.0
-          gamma: 1.0
-          lr: 0.001
-          grad_clip: 1.0
-          rollback_threshold: 3.0
-          rollback_window: 2
-        """,
+        "\n".join(tta_lines),
     )
-    default_checkpoint = tmp_path / "checkpoints" / "toy_fed" / "best.pt"
-    return tta_path, load_config(tta_path), load_config(tta_path.with_name("fed.yaml")), default_checkpoint
+    tta_config = load_config(tta_path)
+    prereq_config = load_config(tta_path.with_name("fed.yaml"))
+    default_checkpoint = resolve_checkpoint_path(
+        None,
+        prereq_config.checkpoint_dir,
+        prereq_config.dataset,
+        "fed",
+        metadata=build_checkpoint_metadata(prereq_config, "fed"),
+    )
+    return tta_path, tta_config, prereq_config, default_checkpoint
 
 
 def _save_checkpoint(config, checkpoint_path: Path, with_metadata: bool = True) -> None:
@@ -82,9 +101,12 @@ def test_auto_prereq_builds_missing_custom_checkpoint(monkeypatch: pytest.Monkey
     custom_checkpoint = tmp_path / "custom" / "fed_best.pt"
     tta_path, config, prereq_config, _ = _fed_case(tmp_path, checkpoint_path=custom_checkpoint)
     built: list[Path] = []
+    run_dirs: list[Path] = []
 
     def fake_fed_runner(config, clients, device, run_dir, checkpoint_path_override=None) -> None:
         built.append(Path(checkpoint_path_override))
+        run_dirs.append(Path(run_dir))
+        print("fake prereq runner")
         _save_checkpoint(config, Path(checkpoint_path_override))
 
     monkeypatch.setitem(BASELINE_RUNNERS, "fed", fake_fed_runner)
@@ -94,6 +116,10 @@ def test_auto_prereq_builds_missing_custom_checkpoint(monkeypatch: pytest.Monkey
 
     assert prereq_config.baseline == "fed"
     assert built == [custom_checkpoint]
+    assert len(run_dirs) == 1
+    assert run_dirs[0].parent == tmp_path / "runs"
+    assert (run_dirs[0] / "run.log").exists()
+    assert "fake prereq runner" in (run_dirs[0] / "run.log").read_text()
     assert resolved.checkpoint_path == str(custom_checkpoint)
     assert json.loads(checkpoint_metadata_path(custom_checkpoint).read_text())["source_baseline"] == "fed"
 

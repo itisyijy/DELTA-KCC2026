@@ -8,6 +8,7 @@ import torch
 from scripts.config import ExperimentConfig, load_config
 from scripts.data.dataset import ClientData
 from scripts.models.revin_dlinear import RevINDLinear
+from scripts.utils.run_logging import tee_run_output
 from scripts.utils.tools import (
     build_checkpoint_metadata,
     load_checkpoint_metadata,
@@ -128,13 +129,16 @@ def resolve_or_build_prereq_checkpoint(
         print(f"[AutoPrereq] Rebuilding {prereq_baseline} checkpoint at {checkpoint_path}")
         print(f"  - {error}")
         prereq_run_dir = make_run_dir(config.output_dir, config.dataset, prereq_baseline)
-        baseline_runners[prereq_baseline](
-            prereq_config,
-            clients,
-            device,
-            prereq_run_dir,
-            checkpoint_path_override=checkpoint_path,
-        )
+        print(f"[AutoPrereq] Prereq run_dir={prereq_run_dir}")
+        with tee_run_output(prereq_run_dir) as prereq_log_path:
+            print(f"[AutoPrereq] Writing prereq log to {prereq_log_path}")
+            baseline_runners[prereq_baseline](
+                prereq_config,
+                clients,
+                device,
+                prereq_run_dir,
+                checkpoint_path_override=checkpoint_path,
+            )
         error = checkpoint_error(allow_legacy=False)
         if error is not None:
             raise RuntimeError(

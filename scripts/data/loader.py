@@ -17,7 +17,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .dataset import ClientData
-from .parquet_manifest import load_manifest_records
+from .parquet_manifest import load_manifest_records, resolve_scale_stats
 
 
 def load_csv_as_clients(
@@ -156,18 +156,15 @@ def load_parquet_as_clients(
             "test":  (n_train + n_val, len(series)),
         }
 
-        # Fit StandardScaler on train split only (same as load_csv_as_clients)
-        scaler = StandardScaler()
-        scaler.fit(series[:n_train])
-        series = scaler.transform(series).astype(np.float32)
+        global_mean, global_std = resolve_scale_stats(rec, channels)
 
         clients.append(
             ClientData(
                 client_id=client_id,
                 values=series,
                 split_indices=split_indices,
-                global_mean=float(scaler.mean_[0]),
-                global_std=float(scaler.scale_[0]),
+                global_mean=global_mean,
+                global_std=global_std,
             )
         )
 

@@ -1,136 +1,24 @@
-"""
-FED-TTA Loop (Baseline 5): TTA with server feedback.
-
-Plan.md §2.4:
-  After each test window position:
-    1. Each client runs one TTA step.
-    2. Valid deltas (not rolled back) are collected, clipped, and aggregated.
-    3. Global model is updated in-place with the aggregated delta.
-    4. All clients start the next window from the updated global model.
-
-Delta clipping + decay prevent error accumulation.
-Rollback-skipped batches are excluded from FL feedback.
-"""
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from scripts.config import TTAConfig, FeedbackConfig
 from scripts.data.dataset import ClientData
 from scripts.models.revin_dlinear import RevINDLinear
 from scripts.tta.adapter import prepare_tta_model
+from scripts.tta.delta import ClientDelta, aggregate_deltas, apply_server_feedback, clip_delta, compute_delta, get_model_weights
 from scripts.tta.engine import (
     RollbackGuard,
     ReconTracker,
-    TTAStepResult,
     build_hindcast_inputs,
-    evaluate_client,
     run_tta_step,
 )
 from scripts.tta.loss import TTALoss
 from scripts.utils.metrics import mae, mse, smape, inverse_global_scale
-
-
-@dataclass
-class ClientDelta:
-    client_id: str
-    delta_trend: torch.Tensor    # W_trend_TTA  - W_trend_FL
-    delta_season: torch.Tensor   # W_season_TTA - W_season_FL
-    n_valid_steps: int           # number of non-skipped TTA steps
-
-
-def compute_delta(
-    model: RevINDLinear,
-    anchor_trend_w: torch.Tensor,
-    anchor_season_w: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Current W - anchor for both components."""
-    linear_trend = model.linear_trend
-    linear_season = model.linear_seasonal
-
-    if isinstance(linear_trend, nn.ModuleList):
-        w_trend = torch.stack([l.weight for l in linear_trend])
-        w_season = torch.stack([l.weight for l in linear_season])
-    else:
-        w_trend = linear_trend.weight
-        w_season = linear_season.weight
-
-    return (w_trend - anchor_trend_w).detach(), (w_season - anchor_season_w).detach()
-
-
-def clip_delta(delta: torch.Tensor, max_norm: float) -> torch.Tensor:
-    """Clip delta tensor by max L2 norm."""
-    if max_norm <= 0:
-        return delta
-    norm = delta.norm()
-    if norm > max_norm:
-        delta = delta * (max_norm / (norm + 1e-8))
-    return delta
-
-
-def _get_model_weights(
-    model: RevINDLinear,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Detached clone of current (w_trend, w_season) for anchor reset."""
-    linear_trend = model.linear_trend
-    linear_season = model.linear_seasonal
-
-    if isinstance(linear_trend, nn.ModuleList):
-        w_trend = torch.stack([l.weight for l in linear_trend])
-        w_season = torch.stack([l.weight for l in linear_season])
-    else:
-        w_trend = linear_trend.weight
-        w_season = linear_season.weight
-
-    return w_trend.detach().clone(), w_season.detach().clone()
-
-
-def aggregate_deltas(
-    client_deltas: list[ClientDelta],
-    decay_factor: float = 0.9,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """
-    Weighted average of deltas (weight = n_valid_steps), scaled by decay_factor.
-    Returns None if no valid deltas.
-    """
-    valid = [d for d in client_deltas if d.n_valid_steps > 0]
-    if not valid:
-        return None
-
-    total_weight = sum(d.n_valid_steps for d in valid)
-    agg_trend = torch.zeros_like(valid[0].delta_trend)
-    agg_season = torch.zeros_like(valid[0].delta_season)
-
-    for d in valid:
-        w = d.n_valid_steps / total_weight
-        agg_trend += d.delta_trend.float() * w
-        agg_season += d.delta_season.float() * w
-
-    return agg_trend * decay_factor, agg_season * decay_factor
-
-
-def apply_server_feedback(
-    global_model: RevINDLinear,
-    agg_delta_trend: torch.Tensor,
-    agg_delta_season: torch.Tensor,
-) -> None:
-    """Update global model weights in-place: W += aggregated_delta."""
-    linear_trend = global_model.linear_trend
-    linear_season = global_model.linear_seasonal
-
-    if isinstance(linear_trend, nn.ModuleList):
-        for i, layer in enumerate(linear_trend):
-            layer.weight.data += agg_delta_trend[i]
-        for i, layer in enumerate(linear_season):
-            layer.weight.data += agg_delta_season[i]
-    else:
-        linear_trend.weight.data += agg_delta_trend
-        linear_season.weight.data += agg_delta_season
+from scripts.utils.run_logging import MilestoneLogger
 
 
 def run_fed_tta_loop(
@@ -183,6 +71,9 @@ def run_fed_tta_loop(
     # Determine the test time range (use first client as reference)
     # All clients share the same split structure (loaded from same CSV)
     test_s, test_e = clients[0].split_indices["test"]
+    total_steps = max(0, test_e - (test_s + seq_len + k - 1))
+    progress = MilestoneLogger("FED-TTA Loop", total_steps)
+    progress.start(detail=f"clients={len(clients)}")
 
     # Accumulate predictions for final evaluation
     # per-client: list of (pred [pred_len, 1], target [pred_len, 1])
@@ -216,7 +107,6 @@ def run_fed_tta_loop(
                 grad_clip=tta_config.grad_clip,
             )
 
-            # Collect delta for FL feedback (skip if rollback)
             if not result.skipped:
                 dt, ds = compute_delta(cm, anchor_t, anchor_s)
                 dt = clip_delta(dt, feedback_config.delta_clip_norm)
@@ -251,16 +141,14 @@ def run_fed_tta_loop(
         if aggregated is not None:
             agg_dt, agg_ds = aggregated
             apply_server_feedback(global_model, agg_dt, agg_ds)
-            # Broadcast updated global weights to all clients.
-            # Fix: reset anchors and optimizer state so that deltas at the next
-            # step reflect only the current round's TTA adaptation, not the
-            # accumulated global drift from the original FL checkpoint.
             for ci, cm in enumerate(client_models):
                 cm.load_state_dict(global_model.state_dict())
-                client_anchors[ci] = _get_model_weights(cm)
+                client_anchors[ci] = get_model_weights(cm)
                 client_optimizers[ci].state.clear()
+        progress.update(t_rel + 1, detail=f"active_deltas={len(client_deltas)}")
 
     # --- Compute per-client metrics ---
+    progress.finish(detail=f"clients={len(clients)}")
     results: dict[str, dict[str, float]] = {}
     for ci, client in enumerate(clients):
         preds = all_preds[ci]
