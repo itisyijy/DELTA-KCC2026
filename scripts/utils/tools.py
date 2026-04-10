@@ -1,7 +1,9 @@
 """Utility helpers: early stopping, reproducibility, result persistence."""
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import random
 from datetime import datetime
@@ -20,16 +22,65 @@ def checkpoint_metadata_path(checkpoint_path: str | Path) -> Path:
     return checkpoint_path.with_name(f"{checkpoint_path.name}.meta.json")
 
 
+def _format_lr(lr: float) -> str:
+    """Format a learning rate as a compact string, e.g. 0.001 → 'lr1e-3'."""
+    if lr <= 0:
+        return f"lr{lr}"
+    exp = math.floor(math.log10(lr))
+    mantissa = lr / 10 ** exp
+    m = f"{mantissa:.2g}".rstrip("0").rstrip(".")
+    return f"lr{m}e{exp}"
+
+
+def checkpoint_slug(metadata: dict[str, Any]) -> str:
+    """
+    Generate a human-readable + hash slug for the checkpoint subdirectory.
+
+    Format:
+      centralized: seq{N}_pred{N}_k{N}_{lr}_ep{N}_s{N}_{hash6}
+      fed:         seq{N}_pred{N}_k{N}_{lr}_r{N}_s{N}_{hash6}
+    """
+    m = metadata["model"]
+    t = metadata["training"]
+    baseline = metadata["source_baseline"]
+
+    parts = [
+        f"seq{m['seq_len']}",
+        f"pred{m['pred_len']}",
+        f"k{m['kernel_size']}",
+        _format_lr(t["lr"]),
+    ]
+    if baseline == "centralized":
+        parts.append(f"ep{t['epochs']}")
+    elif baseline == "fed":
+        parts.append(f"r{t['global_rounds']}")
+    parts.append(f"s{t['seed']}")
+
+    canonical = json.dumps(metadata, sort_keys=True)
+    hash6 = hashlib.sha256(canonical.encode()).hexdigest()[:6]
+    parts.append(hash6)
+
+    return "_".join(parts)
+
+
 def resolve_checkpoint_path(
     checkpoint_path_override: str | Path | None,
     checkpoint_dir: str | Path,
     dataset: str,
     baseline: str,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
-    """Resolve a checkpoint path from an explicit override or the canonical default."""
+    """Resolve a checkpoint path from an explicit override or the canonical default.
+
+    If metadata is provided, the checkpoint is stored under a slug subdirectory
+    encoding the key hyperparameters and a config hash for uniqueness.
+    """
     if checkpoint_path_override:
         return Path(checkpoint_path_override)
-    return Path(checkpoint_dir) / f"{dataset}_{baseline}" / "best.pt"
+    base = Path(checkpoint_dir) / f"{dataset}_{baseline}"
+    if metadata is not None:
+        return base / checkpoint_slug(metadata) / "best.pt"
+    return base / "best.pt"
 
 
 def build_checkpoint_metadata(config: Any, source_baseline: str) -> dict[str, Any]:

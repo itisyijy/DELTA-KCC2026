@@ -105,11 +105,13 @@ def run_fedavg(
         device = torch.device(config.device if torch.cuda.is_available() else "cpu")
 
     global_model = _make_model(config).to(device)
+    metadata = build_checkpoint_metadata(config, "fed")
     ckpt_path = resolve_checkpoint_path(
         checkpoint_path_override,
         config.checkpoint_dir,
         config.dataset,
         "fed",
+        metadata=metadata,
     )
     best_val_loss = float("inf")
 
@@ -145,6 +147,6 @@ def run_fedavg(
             print(f"  → Best model saved (val_loss={val_loss:.6f})")
 
     # Load best weights
-    write_checkpoint_metadata(ckpt_path, build_checkpoint_metadata(config, "fed"))
+    write_checkpoint_metadata(ckpt_path, metadata)
     global_model.load_state_dict(torch.load(ckpt_path, map_location=device))
     return global_model

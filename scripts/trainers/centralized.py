@@ -57,11 +57,13 @@ def run_centralized(
     train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=0)
 
+    metadata = build_checkpoint_metadata(config, "centralized")
     ckpt_path = resolve_checkpoint_path(
         checkpoint_path_override,
         config.checkpoint_dir,
         config.dataset,
         "centralized",
+        metadata=metadata,
     )
     early_stop = EarlyStopping(patience=config.patience)
 
@@ -96,6 +98,6 @@ def run_centralized(
             break
 
     # Load best weights
-    write_checkpoint_metadata(ckpt_path, build_checkpoint_metadata(config, "centralized"))
+    write_checkpoint_metadata(ckpt_path, metadata)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     return model

@@ -91,13 +91,14 @@ def resolve_or_build_prereq_checkpoint(
             f"{config.baseline!r} requires {prereq_baseline!r} to use matching dataset/model settings."
         )
 
+    expected_metadata = build_checkpoint_metadata(prereq_config, prereq_baseline)
     checkpoint_path = resolve_checkpoint_path(
         config.checkpoint_path or None,
         config.checkpoint_dir,
         config.dataset,
         prereq_baseline,
+        metadata=expected_metadata,
     )
-    expected_metadata = build_checkpoint_metadata(prereq_config, prereq_baseline)
 
     def checkpoint_error(allow_legacy: bool) -> str | None:
         if not checkpoint_path.exists():
