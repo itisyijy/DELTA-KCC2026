@@ -73,6 +73,23 @@ def clip_delta(delta: torch.Tensor, max_norm: float) -> torch.Tensor:
     return delta
 
 
+def _get_model_weights(
+    model: RevINDLinear,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Detached clone of current (w_trend, w_season) for anchor reset."""
+    linear_trend = model.linear_trend
+    linear_season = model.linear_seasonal
+
+    if isinstance(linear_trend, nn.ModuleList):
+        w_trend = torch.stack([l.weight for l in linear_trend])
+        w_season = torch.stack([l.weight for l in linear_season])
+    else:
+        w_trend = linear_trend.weight
+        w_season = linear_season.weight
+
+    return w_trend.detach().clone(), w_season.detach().clone()
+
+
 def aggregate_deltas(
     client_deltas: list[ClientDelta],
     decay_factor: float = 0.9,
@@ -234,9 +251,14 @@ def run_fed_tta_loop(
         if aggregated is not None:
             agg_dt, agg_ds = aggregated
             apply_server_feedback(global_model, agg_dt, agg_ds)
-            # Broadcast updated global weights to all clients
-            for cm in client_models:
+            # Broadcast updated global weights to all clients.
+            # Fix: reset anchors and optimizer state so that deltas at the next
+            # step reflect only the current round's TTA adaptation, not the
+            # accumulated global drift from the original FL checkpoint.
+            for ci, cm in enumerate(client_models):
                 cm.load_state_dict(global_model.state_dict())
+                client_anchors[ci] = _get_model_weights(cm)
+                client_optimizers[ci].state.clear()
 
     # --- Compute per-client metrics ---
     results: dict[str, dict[str, float]] = {}

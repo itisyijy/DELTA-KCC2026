@@ -47,6 +47,14 @@ cd /home/jylee/DLinear-Season-Trend
 
 `--auto-prereq`를 사용하면 TTA 계열 baseline 실행 시 필요한 선행 체크포인트를 자동으로 검증합니다. 체크포인트가 없거나, sidecar metadata(`best.pt.meta.json`) 기준으로 현재 prerequisite config와 맞지 않으면 해당 prerequisite baseline을 먼저 다시 학습한 뒤 이어서 실행합니다.
 
+## 현재 상태 메모
+
+`fed_tta_loop`는 2026-04-10 기준으로 안정화 작업이 필요한 상태입니다.
+
+- 현재 구현은 server feedback에 누적 delta를 주입하는 구조라 장기 test horizon에서 발산할 수 있습니다.
+- 실제 run 결과에서도 `fed_tta_loop`만 `fed_tta`/`dlinear_tta` 대비 비정상적으로 큰 MSE를 보였습니다.
+- 따라서 현재 `Baseline 5` 결과는 최종 비교 실험에 사용하지 말고, 디버깅 및 안정화 검증용으로만 사용해야 합니다.
+
 모든 실행 예시는 기본적으로 `tmux` detached session 기준입니다.
 
 ``` BASH
@@ -127,7 +135,10 @@ tmux new-session -d -s murata_fed_tta_auto \
     "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --auto-prereq"
 ```
 
-## Baseline 5 (제안 기법): FED-TTA Loop
+## Baseline 5 (안정화 필요): FED-TTA Loop
+
+현재 섹션의 실행 명령은 재현 및 디버깅 용도입니다. `fed_tta_loop`는 아직 안정화 전이므로, 결과가 발산하면 구현 이슈로 해석해야 하며 성능 비교 결론에 포함하면 안 됩니다.
+
 ``` BASH
 # solar
 tmux new-session -d -s solar_fed_tta_loop \

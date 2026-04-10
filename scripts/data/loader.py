@@ -17,7 +17,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .dataset import ClientData
-from .parquet_manifest import load_manifest_records, resolve_scale_stats
+from .parquet_manifest import load_manifest_records
 
 
 def load_csv_as_clients(
@@ -156,16 +156,18 @@ def load_parquet_as_clients(
             "test":  (n_train + n_val, len(series)),
         }
 
-        # Global scale stats (for inverse transform at sMAPE evaluation)
-        mean, std = resolve_scale_stats(rec, channels)
+        # Fit StandardScaler on train split only (same as load_csv_as_clients)
+        scaler = StandardScaler()
+        scaler.fit(series[:n_train])
+        series = scaler.transform(series).astype(np.float32)
 
         clients.append(
             ClientData(
                 client_id=client_id,
                 values=series,
                 split_indices=split_indices,
-                global_mean=mean,
-                global_std=std,
+                global_mean=float(scaler.mean_[0]),
+                global_std=float(scaler.scale_[0]),
             )
         )
 
