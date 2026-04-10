@@ -17,6 +17,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .dataset import ClientData
+from .parquet_manifest import load_manifest_records, resolve_scale_stats
 
 
 def load_csv_as_clients(
@@ -121,11 +122,7 @@ def load_parquet_as_clients(
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    # Support both list-of-records and dict-of-records manifest formats
-    if isinstance(manifest, dict):
-        records = list(manifest.values())
-    else:
-        records = manifest
+    records, channels = load_manifest_records(manifest)
 
     # Filter ready clients
     records = [r for r in records if r.get("status", "ready") == "ready"]
@@ -160,8 +157,7 @@ def load_parquet_as_clients(
         }
 
         # Global scale stats (for inverse transform at sMAPE evaluation)
-        mean = float(rec.get("mean_full", rec.get("mean", 0.0)))
-        std = float(rec.get("std_full", rec.get("std", 1.0)))
+        mean, std = resolve_scale_stats(rec, channels)
 
         clients.append(
             ClientData(
