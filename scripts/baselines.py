@@ -17,6 +17,7 @@ from scripts.tta.adapter import prepare_tta_model
 from scripts.tta.engine import RollbackGuard, ReconTracker, build_hindcast_inputs, evaluate_client, run_tta_step
 from scripts.tta.loop import run_fed_tta_loop
 from scripts.tta.loss import TTALoss
+from scripts.tta.policy import get_tta_parameters
 from scripts.utils.metrics import inverse_global_scale, mae, mse, smape, wasserstein_noniid
 from scripts.utils.run_logging import MilestoneLogger
 from scripts.utils.tools import save_results
@@ -91,8 +92,8 @@ def _run_tta_eval(
     progress.start(detail=f"clients={len(clients)}")
     for client in clients:
         model_copy = copy.deepcopy(model).to(device)
-        model_copy, anchor_t, anchor_s = prepare_tta_model(model_copy)
-        optimizer = torch.optim.Adam([p for p in model_copy.dlinear.parameters() if p.requires_grad], lr=config.tta.lr)
+        model_copy, anchor_t, anchor_s = prepare_tta_model(model_copy, config.tta.update_scope)
+        optimizer = torch.optim.Adam(get_tta_parameters(model_copy), lr=config.tta.lr)
         guard = RollbackGuard(
             threshold=config.tta.rollback_threshold,
             tracker=ReconTracker(window_size=config.tta.rollback_window),
@@ -119,6 +120,7 @@ def _run_tta_eval(
                 rollback_guard=guard,
                 device=device,
                 grad_clip=config.tta.grad_clip,
+                drift_gate_threshold=config.tta.drift_gate_threshold,
             )
             pred_start = t_abs - config.model.seq_len + 1
             if pred_start >= 0 and pred_start + config.model.seq_len <= len(client.values):

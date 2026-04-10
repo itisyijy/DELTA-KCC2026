@@ -17,6 +17,7 @@ from scripts.tta.engine import (
     run_tta_step,
 )
 from scripts.tta.loss import TTALoss
+from scripts.tta.policy import get_tta_parameters
 from scripts.utils.metrics import mae, mse, smape, inverse_global_scale
 from scripts.utils.run_logging import MilestoneLogger
 
@@ -58,15 +59,14 @@ def run_fed_tta_loop(
 
     for client in clients:
         cm = copy.deepcopy(global_model).to(device)
-        cm, anchor_t, anchor_s = prepare_tta_model(cm)
+        cm, anchor_t, anchor_s = prepare_tta_model(cm, tta_config.update_scope)
         client_models.append(cm)
         client_anchors.append((anchor_t, anchor_s))
         tracker = ReconTracker(window_size=tta_config.rollback_window)
         client_guards.append(
             RollbackGuard(threshold=tta_config.rollback_threshold, tracker=tracker)
         )
-        tta_params = [p for p in cm.dlinear.parameters() if p.requires_grad]
-        client_optimizers.append(torch.optim.Adam(tta_params, lr=tta_config.lr))
+        client_optimizers.append(torch.optim.Adam(get_tta_parameters(cm), lr=tta_config.lr))
 
     # Determine the test time range (use first client as reference)
     # All clients share the same split structure (loaded from same CSV)
@@ -105,6 +105,7 @@ def run_fed_tta_loop(
                 rollback_guard=guard,
                 device=device,
                 grad_clip=tta_config.grad_clip,
+                drift_gate_threshold=tta_config.drift_gate_threshold,
             )
 
             if not result.skipped:

@@ -11,10 +11,12 @@ import torch
 import torch.nn as nn
 
 from scripts.models.revin_dlinear import RevINDLinear
+from scripts.tta.policy import configure_tta_model
 
 
 def prepare_tta_model(
     model: RevINDLinear,
+    update_scope: str = "all",
 ) -> tuple[RevINDLinear, torch.Tensor, torch.Tensor]:
     """
     Prepare model for TTA:
@@ -30,15 +32,7 @@ def prepare_tta_model(
     For individual=True models, weights are stacked into a single tensor
     [C, pred_len, seq_len] for efficient L_reg computation.
     """
-    # Freeze RevIN affine params
-    if hasattr(model.revin, "affine_weight"):
-        model.revin.affine_weight.requires_grad_(False)
-    if hasattr(model.revin, "affine_bias"):
-        model.revin.affine_bias.requires_grad_(False)
-
-    # Ensure DLinear weights are trainable
-    for param in model.dlinear.parameters():
-        param.requires_grad_(True)
+    configure_tta_model(model, update_scope)
 
     # Capture anchors
     linear_trend = model.linear_trend

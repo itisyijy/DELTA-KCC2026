@@ -31,6 +31,8 @@ class TTAConfig:
     grad_clip: float = 1.0
     rollback_threshold: float = 3.0
     rollback_window: int = 20
+    update_scope: str = "all"        # all | norm | trend | season
+    drift_gate_threshold: float = 0.0
 
 
 @dataclass

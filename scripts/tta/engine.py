@@ -1,11 +1,4 @@
-"""
-TTA inference engine: step-by-step adaptation and evaluation.
-
-Plan.md §2.3–2.4:
-  - Pre-update L_recon measurement (no-grad) for rollback gating
-  - Rollback: skip update if L_recon_pre > threshold × rolling_mean(L_recon)
-  - Standard evaluation: MSE/MAE in Global Scale, sMAPE in original units
-"""
+"""TTA inference engine: adaptation steps and per-client evaluation."""
 from __future__ import annotations
 
 from collections import deque
@@ -18,6 +11,7 @@ import torch.nn as nn
 from scripts.data.dataset import ClientData
 from scripts.models.revin_dlinear import RevINDLinear
 from scripts.tta.loss import TTALoss
+from scripts.tta.policy import get_tta_parameters, should_adapt
 from scripts.utils.metrics import mae, mse, smape, inverse_global_scale
 
 
@@ -35,11 +29,7 @@ class ReconTracker:
 
 
 class RollbackGuard:
-    """
-    Pre-update rollback: if L_recon_pre > threshold * rolling_mean → skip.
-
-    When history is empty, the guard never skips (warm-up phase).
-    """
+    """Skip unstable updates after a warm-up history is available."""
 
     def __init__(self, threshold: float = 3.0, tracker: ReconTracker | None = None):
         self.threshold = threshold
@@ -47,7 +37,7 @@ class RollbackGuard:
 
     def should_skip(self, l_recon_pre: float) -> bool:
         avg = self.tracker.rolling_mean()
-        if avg == float("inf"):   # no history yet
+        if avg == float("inf"):
             return False
         return l_recon_pre > self.threshold * avg
 
@@ -58,14 +48,7 @@ def build_hindcast_inputs(
     seq_len: int,
     k: int,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """
-    Build (x_input, x_recent) for hindcast TTA at time step t.
-
-    X_input  = series[t - seq_len - k + 1 : t - k + 1]  shape [seq_len, 1]
-    X_recent = series[t - k + 1 : t + 1]                 shape [k, 1]
-
-    Returns None if t is too small (insufficient history).
-    """
+    """Build the hindcast input/recent pair for one absolute time index."""
     start_input = t - seq_len - k + 1
     end_input = t - k + 1       # exclusive
     start_recent = t - k + 1
@@ -74,8 +57,8 @@ def build_hindcast_inputs(
     if start_input < 0:
         return None
 
-    x_input = series[start_input:end_input]    # [seq_len, 1]
-    x_recent = series[start_recent:end_recent]  # [k, 1]
+    x_input = series[start_input:end_input]
+    x_recent = series[start_recent:end_recent]
     return x_input, x_recent
 
 
@@ -102,28 +85,25 @@ def run_tta_step(
     rollback_guard: RollbackGuard,
     device: torch.device,
     grad_clip: float = 1.0,
+    drift_gate_threshold: float = 0.0,
 ) -> TTAStepResult:
-    """
-    One TTA gradient step.
+    """Run one guarded TTA update step."""
+    x_input_t = torch.from_numpy(x_input).unsqueeze(0).to(device)
+    x_recent_t = torch.from_numpy(x_recent).to(device)
 
-    Algorithm (plan.md §2.4 Safety Mechanisms):
-      1. Pre-measure L_recon with no_grad (rollback gate)
-      2. If should_skip → return skipped result (do NOT update weights)
-      3. optimizer.zero_grad()
-      4. Forward pass (with grad) → y_hat
-      5. Compute TTALoss → backward → clip grads → step
-      6. Update ReconTracker with pre-update L_recon
-    """
-    x_input_t = torch.from_numpy(x_input).unsqueeze(0).to(device)   # [1, seq_len, 1]
-    x_recent_t = torch.from_numpy(x_recent).to(device)               # [k, 1]
-
-    # --- Step 1: pre-update L_recon (no grad) ---
     model.eval()
     with torch.no_grad():
-        y_hat_pre = model(x_input_t)  # [1, pred_len, 1]
+        y_hat_pre = model(x_input_t)
         l_recon_pre = tta_loss_fn.hindcast(y_hat_pre, x_recent_t).item()
 
-    # --- Step 2: rollback gate ---
+    if not should_adapt(x_recent_t, mu_hist, sigma_hist, drift_gate_threshold):
+        rollback_guard.tracker.update(l_recon_pre)
+        return TTAStepResult(
+            skipped=True,
+            skip_reason="drift_gate",
+            l_recon_pre=l_recon_pre,
+        )
+
     if rollback_guard.should_skip(l_recon_pre):
         rollback_guard.tracker.update(l_recon_pre)
         return TTAStepResult(
@@ -132,11 +112,10 @@ def run_tta_step(
             l_recon_pre=l_recon_pre,
         )
 
-    # --- Steps 3–6: gradient update ---
     model.train()
     optimizer.zero_grad()
 
-    y_hat = model(x_input_t)  # [1, pred_len, 1]
+    y_hat = model(x_input_t)
     total_loss, l_recon, l_reg = tta_loss_fn(
         y_hat, x_recent_t, model,
         anchor_trend_w, anchor_season_w,
@@ -144,8 +123,7 @@ def run_tta_step(
     )
     total_loss.backward()
 
-    # Gradient clipping on TTA parameters only
-    tta_params = [p for p in model.dlinear.parameters() if p.requires_grad]
+    tta_params = get_tta_parameters(model)
     nn.utils.clip_grad_norm_(tta_params, grad_clip)
 
     optimizer.step()
@@ -168,13 +146,7 @@ def evaluate_client(
     pred_len: int,
     device: torch.device,
 ) -> dict[str, float]:
-    """
-    Standard (non-TTA) evaluation over a client's test split.
-
-    Computes:
-      - MSE, MAE in Global Scale (after RevIN denorm)
-      - sMAPE in original physical units (after global scaler inverse)
-    """
+    """Standard evaluation over one client's test split."""
     model.eval()
     test_s, test_e = client.split_indices["test"]
     test_data = client.values  # full series [N, 1]
@@ -185,18 +157,16 @@ def evaluate_client(
         for start in range(test_s, test_e - seq_len - pred_len + 1):
             x = test_data[start : start + seq_len]
             y = test_data[start + seq_len : start + seq_len + pred_len]
-            x_t = torch.from_numpy(x).unsqueeze(0).to(device)  # [1, seq_len, 1]
-            pred = model(x_t).cpu().numpy()[0]                  # [pred_len, 1]
+            x_t = torch.from_numpy(x).unsqueeze(0).to(device)
+            pred = model(x_t).cpu().numpy()[0]
             preds_global.append(pred)
             targets_global.append(y)
 
     if not preds_global:
         return {"mse": float("nan"), "mae": float("nan"), "smape": float("nan")}
 
-    preds_g = np.concatenate(preds_global, axis=0)    # [N_test_windows * pred_len, 1]
+    preds_g = np.concatenate(preds_global, axis=0)
     targets_g = np.concatenate(targets_global, axis=0)
-
-    # Inverse transform for sMAPE
     preds_orig = inverse_global_scale(preds_g, client.global_mean, client.global_std)
     targets_orig = inverse_global_scale(targets_g, client.global_mean, client.global_std)
 
