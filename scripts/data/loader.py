@@ -17,7 +17,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from .dataset import ClientData
-from .parquet_manifest import load_manifest_records, resolve_scale_stats
+from .parquet_manifest import load_manifest_records
 
 
 def load_csv_as_clients(
@@ -104,17 +104,19 @@ def load_parquet_as_clients(
 ) -> list[ClientData]:
     """
     Load the kcc2026 legacy parquet format:
-        manifest.json — contains per-client records with split_counts and scale stats
-        clients/*.parquet — one parquet file per client, already globally scaled
+        manifest.json — contains per-client records with split_counts
+        clients/*.parquet — one parquet file per client
 
     Expected manifest structure (per-client entry):
     {
         "client_id": "...",
         "status": "ready",
         "split_counts": {"train": int, "val": int, "test": int},
-        "mean_full": float,   or "mean": float
-        "std_full": float,    or "std": float
     }
+
+    Unlike the CSV path, Murata parquet files are not guaranteed to already be
+    stored in global-scale space. We therefore fit a StandardScaler on the
+    train split for each client and store the transformed series in ClientData.
     """
     manifest_path = Path(manifest_path)
     clients_dir = Path(clients_dir)
@@ -156,15 +158,17 @@ def load_parquet_as_clients(
             "test":  (n_train + n_val, len(series)),
         }
 
-        global_mean, global_std = resolve_scale_stats(rec, channels)
+        scaler = StandardScaler()
+        scaler.fit(series[:n_train])
+        scaled = scaler.transform(series).astype(np.float32)
 
         clients.append(
             ClientData(
                 client_id=client_id,
-                values=series,
+                values=scaled,
                 split_indices=split_indices,
-                global_mean=global_mean,
-                global_std=global_std,
+                global_mean=float(scaler.mean_[0]),
+                global_std=float(scaler.scale_[0]),
             )
         )
 

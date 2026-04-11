@@ -42,8 +42,9 @@ def test_load_parquet_supports_murata_manifest_shape(tmp_path: Path) -> None:
     assert len(clients) == 1
     assert clients[0].client_id == "client_a"
     assert clients[0].split_indices == {"train": (0, 3), "val": (3, 4), "test": (4, 6)}
-    assert clients[0].global_mean == 1.25
-    assert clients[0].global_std == 2.5
+    assert clients[0].global_mean == 1.0
+    assert round(clients[0].global_std, 6) == round((2.0 / 3.0) ** 0.5, 6)
+    assert round(float(clients[0].train_values().mean()), 6) == 0.0
 
 
 def test_load_parquet_keeps_legacy_manifest_support(tmp_path: Path) -> None:
@@ -66,5 +67,5 @@ def test_load_parquet_keeps_legacy_manifest_support(tmp_path: Path) -> None:
 
     assert len(clients) == 1
     assert clients[0].client_id == "client_b"
-    assert clients[0].global_mean == 3.0
-    assert clients[0].global_std == 4.0
+    assert clients[0].global_mean == 1.0
+    assert round(clients[0].global_std, 6) == round((2.0 / 3.0) ** 0.5, 6)
