@@ -86,10 +86,14 @@ def _run_tta_eval(
 ) -> None:
     k = config.k()
     progress = MilestoneLogger(label=label, total_steps=_count_tta_steps(clients, config.model.seq_len, k))
-    tta_loss_fn = TTALoss(k=k, alpha=config.tta.alpha, lambda0=config.tta.lambda0, gamma=config.tta.gamma)
+    tta_loss_fn = TTALoss(k=k, alpha=config.tta.alpha, lambda0=config.tta.lambda0, gamma=config.tta.gamma, lambda_func=config.tta.lambda_func, hindcast_mask_threshold=config.tta.hindcast_mask_threshold)
     per_client: dict[str, dict[str, float]] = {}
     completed_steps = 0
     progress.start(detail=f"clients={len(clients)}")
+    anchor_model = copy.deepcopy(model).to(device).eval() if config.tta.lambda_func > 0.0 else None
+    for param in (anchor_model.parameters() if anchor_model else []):
+        param.requires_grad_(False)
+
     for client in clients:
         model_copy = copy.deepcopy(model).to(device)
         model_copy, anchor_t, anchor_s = prepare_tta_model(model_copy, config.tta.update_scope)
@@ -98,6 +102,12 @@ def _run_tta_eval(
             threshold=config.tta.rollback_threshold,
             tracker=ReconTracker(window_size=config.tta.rollback_window),
         )
+        # EMA anchor (mechanism 2): starts at FL checkpoint, slowly drifts toward adapted weights.
+        # ema_beta=1.0 means fixed anchor (disabled), <1.0 enables progressive personalization.
+        ema_anchor_t = anchor_t.clone()
+        ema_anchor_s = anchor_s.clone()
+        ema_beta = config.tta.ema_beta
+
         preds_g, targets_g = [], []
         test_s, test_e = client.split_indices["test"]
         for t_abs in range(test_s + config.model.seq_len + k - 1, test_e):
@@ -111,8 +121,8 @@ def _run_tta_eval(
                 model=model_copy,
                 optimizer=optimizer,
                 tta_loss_fn=tta_loss_fn,
-                anchor_trend_w=anchor_t,
-                anchor_season_w=anchor_s,
+                anchor_trend_w=ema_anchor_t,
+                anchor_season_w=ema_anchor_s,
                 x_input=x_input,
                 x_recent=x_recent,
                 mu_hist=client.global_mean,
@@ -121,7 +131,23 @@ def _run_tta_eval(
                 device=device,
                 grad_clip=config.tta.grad_clip,
                 drift_gate_threshold=config.tta.drift_gate_threshold,
+                min_active_frac=config.tta.min_active_frac,
+                anchor_model=anchor_model,
             )
+
+            # Update EMA anchor from current model weights (after potential adaptation)
+            if ema_beta < 1.0:
+                lt = model_copy.linear_trend
+                ls = model_copy.linear_seasonal
+                with torch.no_grad():
+                    if isinstance(lt, torch.nn.ModuleList):
+                        cur_t = torch.stack([l.weight for l in lt])
+                        cur_s = torch.stack([l.weight for l in ls])
+                    else:
+                        cur_t = lt.weight
+                        cur_s = ls.weight
+                    ema_anchor_t = ema_beta * ema_anchor_t + (1 - ema_beta) * cur_t.detach()
+                    ema_anchor_s = ema_beta * ema_anchor_s + (1 - ema_beta) * cur_s.detach()
             pred_start = t_abs - config.model.seq_len + 1
             if pred_start >= 0 and pred_start + config.model.seq_len <= len(client.values):
                 x_t = torch.from_numpy(client.values[pred_start : pred_start + config.model.seq_len]).unsqueeze(0).to(device)
