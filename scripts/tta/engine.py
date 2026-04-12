@@ -38,8 +38,12 @@ class ReconTracker:
     def update(self, loss_val: float) -> None:
         self.history.append(loss_val)
 
+    def finite_count(self) -> int:
+        return sum(np.isfinite(v) for v in self.history)
+
     def rolling_mean(self) -> float:
-        return float(np.mean(self.history)) if self.history else float("inf")
+        finite = [v for v in self.history if np.isfinite(v)]
+        return float(np.mean(finite)) if finite else float("inf")
 
 
 class RollbackGuard:
@@ -263,6 +267,8 @@ def run_tta_step_affine(
     mu_hist: float = 0.0,
     sigma_hist: float = 1.0,
     reset_threshold: float = float("inf"),
+    hard_gate_scale: float = 0.0,
+    hard_gate_min_history: int = 0,
     n_inner: int = 1,
 ) -> TTAStepResultV2:
     """
@@ -310,7 +316,20 @@ def run_tta_step_affine(
         k = x_recent_t.shape[1]
         l_hind_pre = (y_pre[:, :k, :] - x_recent_t).pow(2).mean().item()
 
-    # ── Gate 2: Rollback guard ────────────────────────────────────────────────
+    # ── Gate 2: Hard-window gate — 충분히 어려운 창에서만 적응 ─────────────────
+    if hard_gate_scale > 0.0:
+        enough_history = rollback_guard.tracker.finite_count() >= max(1, hard_gate_min_history)
+        hard_gate_ref = rollback_guard.tracker.rolling_mean()
+        if not enough_history or l_hind_pre < hard_gate_scale * hard_gate_ref:
+            rollback_guard.tracker.update(l_hind_pre)
+            return TTAStepResultV2(
+                skipped=True, skip_reason="hard_gate",
+                l_hind=l_hind_pre, l_cons=float("nan"),
+                l_anchor=float("nan"), boost=1.0, reset_applied=False,
+                y_out=y_pre.detach(),
+            )
+
+    # ── Gate 3: Rollback guard ────────────────────────────────────────────────
     if rollback_guard.should_skip(l_hind_pre):
         rollback_guard.tracker.update(l_hind_pre)
         return TTAStepResultV2(
@@ -348,7 +367,7 @@ def run_tta_step_affine(
         nn.utils.clip_grad_norm_(adapter.parameters(), max_norm=max_grad_norm)
         optimizer.step()
 
-    # ── Gate 3: Anomaly gate — 오차 폭발 시 adapter 리셋 ─────────────────────
+    # ── Gate 4: Anomaly gate — 오차 폭발 시 adapter 리셋 ─────────────────────
     reset_applied = logs.get("L_hind", 0.0) > reset_threshold
     if reset_applied:
         adapter.reset()

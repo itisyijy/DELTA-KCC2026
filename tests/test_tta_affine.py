@@ -258,6 +258,37 @@ def test_tta_step_affine_updates_adapter() -> None:
     assert changed, "At least one adapter parameter should have changed"
 
 
+def test_tta_step_affine_hard_gate_skips_easy_window() -> None:
+    model = prepare_frozen_backbone(_model())
+    adapter = _adapter()
+    opt = torch.optim.Adam(adapter.parameters(), lr=1e-2)
+    loss_fn = _loss_fn()
+    guard = RollbackGuard(threshold=1e9, tracker=ReconTracker(20))
+    for loss_val in (1.0, 1.0, 1.0, 1.0):
+        guard.tracker.update(loss_val)
+    x_input = np.zeros((SEQ_LEN, CHANNELS), dtype=np.float32)
+    x_recent = np.zeros((K, CHANNELS), dtype=np.float32)
+
+    result = run_tta_step_affine(
+        frozen_model=model, adapter=adapter, optimizer=opt,
+        loss_fn=loss_fn, x_input=x_input, x_recent=x_recent,
+        y_prev=None, rollback_guard=guard, device=torch.device("cpu"),
+        hard_gate_scale=1.05, hard_gate_min_history=4,
+    )
+
+    assert result.skipped
+    assert result.skip_reason == "hard_gate"
+
+
+def test_recon_tracker_ignores_nan_in_rolling_mean() -> None:
+    tracker = ReconTracker(4)
+    tracker.update(float("nan"))
+    tracker.update(2.0)
+    tracker.update(4.0)
+    assert tracker.finite_count() == 2
+    assert tracker.rolling_mean() == pytest.approx(3.0)
+
+
 def test_tta_step_affine_does_not_update_frozen_model() -> None:
     """TTA step 이후 frozen_model 파라미터가 변하지 않아야 한다."""
     model   = prepare_frozen_backbone(_model())
@@ -382,6 +413,7 @@ def _make_tta_config(**overrides):
     """TTAConfig import 없이 동작하는 최소 config 객체."""
     cfg = dict(
         grad_clip=1.0, drift_gate_threshold=0.0, reset_threshold=float("inf"),
+        hard_gate_scale=0.0, hard_gate_min_history=0,
         alpha=0.3, beta=1.0, lambda_anchor=0.1, sensitivity=1.0, max_boost=5.0,
         lr=1e-3, rollback_threshold=1e9, rollback_window=20,
     )

@@ -9,6 +9,7 @@ from scripts.tta.engine import TTAStepResultV2
 class ClientTTADiagnostics:
     total_steps: int = 0
     adapted_steps: int = 0
+    hard_gate_skips: int = 0
     drift_skips: int = 0
     rollback_skips: int = 0
     reset_steps: int = 0
@@ -35,6 +36,9 @@ class ClientTTADiagnostics:
         self.delta_l1_sum += delta_l1
         self.final_gamma_l1 = gamma_l1
         self.final_delta_l1 = delta_l1
+        if result.skip_reason == "hard_gate":
+            self.hard_gate_skips += 1
+            return
         if result.skip_reason == "drift_gate":
             self.drift_skips += 1
             return
@@ -54,10 +58,12 @@ class ClientTTADiagnostics:
         return {
             "total_steps": self.total_steps,
             "adapted_steps": self.adapted_steps,
+            "hard_gate_skips": self.hard_gate_skips,
             "drift_skips": self.drift_skips,
             "rollback_skips": self.rollback_skips,
             "reset_steps": self.reset_steps,
             "adapt_rate": self.adapted_steps / denom,
+            "hard_gate_skip_rate": self.hard_gate_skips / denom,
             "drift_skip_rate": self.drift_skips / denom,
             "rollback_skip_rate": self.rollback_skips / denom,
             "reset_rate_given_adapt": self.reset_steps / adapted,

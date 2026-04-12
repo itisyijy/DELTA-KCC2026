@@ -65,6 +65,8 @@ class TTAConfig:
     max_boost: float = 5.0
     reset_threshold: float = float("inf")
     adapter_mode: str = "channel_affine"
+    hard_gate_scale: float = 0.0
+    hard_gate_min_history: int = 0
 
 
 @dataclass

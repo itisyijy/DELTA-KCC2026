@@ -76,3 +76,21 @@ def test_diagnostics_aggregate_time_affine_magnitudes() -> None:
     assert stats["mean_delta_l1"] == pytest.approx(0.03)
     assert stats["final_gamma_l1"] == pytest.approx(0.02)
     assert stats["final_delta_l1"] == pytest.approx(0.03)
+
+
+def test_diagnostics_track_hard_gate_skip() -> None:
+    diag = ClientTTADiagnostics()
+    result = TTAStepResultV2(
+        skipped=True,
+        skip_reason="hard_gate",
+        l_hind=0.2,
+        l_cons=float("nan"),
+        l_anchor=float("nan"),
+        boost=1.0,
+        reset_applied=False,
+        y_out=torch.zeros(1, PRED_LEN, CHANNELS),
+    )
+    diag.update(result, gamma_l1=0.0, delta_l1=0.0)
+    stats = diag.as_dict()
+    assert stats["adapt_rate"] == pytest.approx(0.0)
+    assert stats["hard_gate_skip_rate"] == pytest.approx(1.0)

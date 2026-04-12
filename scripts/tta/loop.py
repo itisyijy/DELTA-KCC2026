@@ -261,6 +261,8 @@ def _client_step_worker(
         mu_hist=client.global_mean,
         sigma_hist=max(client.global_std, 1e-8),
         reset_threshold=tta_config.reset_threshold,
+        hard_gate_scale=tta_config.hard_gate_scale,
+        hard_gate_min_history=tta_config.hard_gate_min_history,
     )
 
     new_y_prev = result.y_out  # already detached in run_tta_step_affine

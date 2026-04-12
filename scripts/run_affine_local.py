@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "[Affine Local TTA] Diagnostics: "
             f"adapt_rate={diagnostic_summary['adapt_rate']:.3f}  "
+            f"hard_gate={diagnostic_summary['hard_gate_skip_rate']:.3f}  "
             f"drift_skip={diagnostic_summary['drift_skip_rate']:.3f}  "
             f"rollback_skip={diagnostic_summary['rollback_skip_rate']:.3f}  "
             f"reset/adapt={diagnostic_summary['reset_rate_given_adapt']:.3f}  "
