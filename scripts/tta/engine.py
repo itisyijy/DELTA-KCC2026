@@ -243,6 +243,7 @@ class TTAStepResultV2:
     l_cons: float
     l_anchor: float
     boost: float
+    reset_applied: bool
     y_out: torch.Tensor | None  # [1, pred_len, C] — None when skipped
 
 
@@ -299,7 +300,7 @@ def run_tta_step_affine(
         return TTAStepResultV2(
             skipped=True, skip_reason="drift_gate",
             l_hind=float("nan"), l_cons=float("nan"),
-            l_anchor=float("nan"), boost=1.0,
+            l_anchor=float("nan"), boost=1.0, reset_applied=False,
             y_out=y_out.detach(),
         )
 
@@ -315,7 +316,7 @@ def run_tta_step_affine(
         return TTAStepResultV2(
             skipped=True, skip_reason="rollback",
             l_hind=l_hind_pre, l_cons=float("nan"),
-            l_anchor=float("nan"), boost=1.0,
+            l_anchor=float("nan"), boost=1.0, reset_applied=False,
             y_out=y_pre.detach(),
         )
 
@@ -348,7 +349,8 @@ def run_tta_step_affine(
         optimizer.step()
 
     # ── Gate 3: Anomaly gate — 오차 폭발 시 adapter 리셋 ─────────────────────
-    if logs.get("L_hind", 0.0) > reset_threshold:
+    reset_applied = logs.get("L_hind", 0.0) > reset_threshold
+    if reset_applied:
         adapter.reset()
 
     rollback_guard.tracker.update(l_hind_pre)
@@ -364,5 +366,6 @@ def run_tta_step_affine(
         l_cons=logs.get("L_cons", float("nan")),
         l_anchor=logs.get("L_anchor", float("nan")),
         boost=logs.get("boost", 1.0),
+        reset_applied=reset_applied,
         y_out=y_out.detach(),
     )

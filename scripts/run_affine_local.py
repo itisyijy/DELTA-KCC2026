@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
                 baseline_runners=BASELINE_RUNNERS,
             )
 
-        per_client = run_local_tta_loop(
+        per_client, per_client_diagnostics, diagnostic_summary = run_local_tta_loop(
             global_model=load_model(config, device),
             clients=clients,
             seq_len=config.model.seq_len,
@@ -103,10 +103,21 @@ def main(argv: list[str] | None = None) -> None:
             f"\n[Affine Local TTA] Avg: MSE={avg['mse']:.4f}  "
             f"MAE={avg['mae']:.4f}  sMAPE={avg['smape']:.2f}%"
         )
+        print(
+            "[Affine Local TTA] Diagnostics: "
+            f"adapt_rate={diagnostic_summary['adapt_rate']:.3f}  "
+            f"drift_skip={diagnostic_summary['drift_skip_rate']:.3f}  "
+            f"rollback_skip={diagnostic_summary['rollback_skip_rate']:.3f}  "
+            f"reset/adapt={diagnostic_summary['reset_rate_given_adapt']:.3f}  "
+            f"mean|gamma-1|={diagnostic_summary['mean_gamma_l1']:.6f}  "
+            f"mean|delta|={diagnostic_summary['mean_delta_l1']:.6f}"
+        )
         payload = {
             "engine": "affine_local_tta",
             "per_client": per_client,
+            "per_client_diagnostics": per_client_diagnostics,
             "avg": avg,
+            "diagnostic_summary": diagnostic_summary,
             "max_workers": max(1, args.max_workers),
         }
         save_results(run_dir, payload, dataclasses.asdict(config))

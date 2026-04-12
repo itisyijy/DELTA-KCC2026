@@ -15,6 +15,7 @@ from scripts.data.dataset import ClientData
 from scripts.models.revin_dlinear import RevINDLinear
 from scripts.tta.adapter import AffineAdapter, prepare_frozen_backbone, prepare_tta_model
 from scripts.tta.delta import ClientDelta, aggregate_deltas, apply_server_feedback, clip_delta, compute_delta, get_model_weights
+from scripts.tta.diagnostics import ClientTTADiagnostics
 from scripts.tta.engine import (
     RollbackGuard,
     ReconTracker,
@@ -213,7 +214,7 @@ def _client_step_worker(
     loss_fn: HybridTTALoss,
     tta_config: "TTAConfig",
     device: torch.device,
-) -> tuple[int, torch.Tensor | None, "np.ndarray | None", "np.ndarray | None"]:
+) -> tuple[int, torch.Tensor | None, "np.ndarray | None", "np.ndarray | None", TTAStepResultV2 | None]:
     """
     한 시점(t_abs)에서 한 클라이언트의 TTA 스텝을 처리. ThreadPoolExecutor 워커용.
 
@@ -241,7 +242,7 @@ def _client_step_worker(
 
     inputs = build_hindcast_inputs(client.values, t_abs, seq_len, k)
     if inputs is None:
-        return ci, y_prev, None, None
+        return ci, y_prev, None, None, None
 
     x_input, x_recent = inputs
 
@@ -282,7 +283,7 @@ def _client_step_worker(
         else:
             pred_np = None  # target 길이 불일치 시 둘 다 버림
 
-    return ci, new_y_prev, pred_np, target_np
+    return ci, new_y_prev, pred_np, target_np, result
 
 
 def run_local_tta_loop(
@@ -295,7 +296,7 @@ def run_local_tta_loop(
     tta_config: "TTAConfig",
     device: torch.device,
     max_workers: int = 1,
-) -> dict[str, dict[str, float]]:
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, float]]:
     """
     Affine-Adapter TTA: 백본 완전 동결, 클라이언트별 AffineAdapter(γ,δ) 만 업데이트.
 
@@ -376,6 +377,7 @@ def run_local_tta_loop(
     # 클라이언트별 누적 예측/정답
     all_preds:   list[list[np.ndarray]] = [[] for _ in clients]
     all_targets: list[list[np.ndarray]] = [[] for _ in clients]
+    diagnostics = [ClientTTADiagnostics() for _ in clients]
 
     # 클라이언트별 이전 창 예측 (Temporal Consistency Loss용)
     y_prevs: list[torch.Tensor | None] = [None] * len(clients)
@@ -396,11 +398,16 @@ def run_local_tta_loop(
                 for ci, (client, fm, adapter, opt, guard) in enumerate(
                     zip(clients, frozen_models, adapters, optimizers, guards)
                 ):
-                    _, new_y_prev, pred_np, target_np = _client_step_worker(
+                    _, new_y_prev, pred_np, target_np, result = _client_step_worker(
                         ci=ci, client=client, fm=fm, adapter=adapter,
                         opt=opt, guard=guard, y_prev=y_prevs[ci],
                         t_abs=t_abs, seq_len=seq_len, pred_len=pred_len, k=k,
                         loss_fn=loss_fn, tta_config=tta_config, device=device,
+                    )
+                    diagnostics[ci].update(
+                        result,
+                        gamma_l1=float((adapter.gamma - 1.0).abs().mean().item()),
+                        delta_l1=float(adapter.delta.abs().mean().item()),
                     )
                     y_prevs[ci] = new_y_prev
                     if pred_np is not None and target_np is not None:
@@ -427,7 +434,12 @@ def run_local_tta_loop(
                 # Step 2: 결과 수집 (메인 스레드에서 순차적으로)
                 #   y_prevs 쓰기는 모든 future가 완료된 후 메인 스레드에서만 수행
                 for future in concurrent.futures.as_completed(futures):
-                    ci, new_y_prev, pred_np, target_np = future.result()
+                    ci, new_y_prev, pred_np, target_np, result = future.result()
+                    diagnostics[ci].update(
+                        result,
+                        gamma_l1=float((adapters[ci].gamma - 1.0).abs().mean().item()),
+                        delta_l1=float(adapters[ci].delta.abs().mean().item()),
+                    )
                     y_prevs[ci] = new_y_prev
                     if pred_np is not None and target_np is not None:
                         all_preds[ci].append(pred_np)
@@ -464,4 +476,13 @@ def run_local_tta_loop(
             "smape": smape(preds_orig, targets_orig),
         }
 
-    return results
+    per_client_diagnostics = {
+        client.client_id: diagnostics[ci].as_dict()
+        for ci, client in enumerate(clients)
+    }
+    summary_keys = tuple(next(iter(per_client_diagnostics.values())).keys()) if per_client_diagnostics else ()
+    diagnostic_summary = {
+        key: float(np.mean([stats[key] for stats in per_client_diagnostics.values()]))
+        for key in summary_keys
+    }
+    return results, per_client_diagnostics, diagnostic_summary
