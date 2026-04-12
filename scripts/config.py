@@ -64,6 +64,7 @@ class TTAConfig:
     sensitivity: float = 1.0
     max_boost: float = 5.0
     reset_threshold: float = float("inf")
+    adapter_mode: str = "channel_affine"
 
 
 @dataclass

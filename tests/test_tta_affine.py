@@ -419,7 +419,7 @@ def test_client_step_worker_returns_correct_ci() -> None:
     guard   = RollbackGuard(threshold=1e9, tracker=ReconTracker(20))
 
     ci_in = 42
-    ci_out, _, _, _ = _client_step_worker(
+    ci_out, _, _, _, _ = _client_step_worker(
         ci=ci_in, client=_make_client("c0"),
         fm=model, adapter=adapter, opt=opt, guard=guard, y_prev=None,
         t_abs=_T_ABS, seq_len=SEQ_LEN, pred_len=PRED_LEN, k=K,

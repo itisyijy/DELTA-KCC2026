@@ -17,38 +17,16 @@ write_cfg() {
   dst=$3
   prereq_dst=$4
   outdir=$5
-  k_ratio=$6
-  lr=$7
-  alpha=$8
-  beta=$9
-  lambda_anchor=${10}
-  sensitivity=${11}
-  max_boost=${12}
-  reset_threshold=${13}
+  adapter_mode=$6
+  k_ratio=$7
+  reset_threshold=$8
   "$PYTHON" - "$base_cfg" "$prereq_cfg" "$dst" "$prereq_dst" "$DEVICE" "$outdir" \
-    "$k_ratio" "$lr" "$alpha" "$beta" "$lambda_anchor" "$sensitivity" "$max_boost" \
-    "$reset_threshold" <<'PY'
+    "$adapter_mode" "$k_ratio" "$reset_threshold" <<'PY'
 import math
 import sys
 import yaml
 
-(
-    base_cfg,
-    prereq_cfg,
-    dst,
-    prereq_dst,
-    device,
-    outdir,
-    k_ratio,
-    lr,
-    alpha,
-    beta,
-    lambda_anchor,
-    sensitivity,
-    max_boost,
-    reset_threshold,
-) = sys.argv[1:]
-
+base_cfg, prereq_cfg, dst, prereq_dst, device, outdir, mode, k_ratio, reset_thr = sys.argv[1:]
 with open(base_cfg) as f:
     cfg = yaml.safe_load(f)
 with open(prereq_cfg) as f:
@@ -57,17 +35,16 @@ with open(prereq_cfg) as f:
 cfg["device"] = device
 cfg["output_dir"] = outdir
 cfg.setdefault("tta", {})
+cfg["tta"]["adapter_mode"] = mode
 cfg["tta"]["k_ratio"] = float(k_ratio)
-cfg["tta"]["lr"] = float(lr)
-cfg["tta"]["alpha"] = float(alpha)
-cfg["tta"]["beta"] = float(beta)
-cfg["tta"]["lambda_anchor"] = float(lambda_anchor)
-cfg["tta"]["sensitivity"] = float(sensitivity)
-cfg["tta"]["max_boost"] = float(max_boost)
-cfg["tta"]["reset_threshold"] = math.inf if reset_threshold == "inf" else float(reset_threshold)
+cfg["tta"]["lr"] = 1e-4
+cfg["tta"]["alpha"] = 0.3
+cfg["tta"]["beta"] = 1.0
+cfg["tta"]["lambda_anchor"] = 0.1
+cfg["tta"]["sensitivity"] = 1.0
+cfg["tta"]["max_boost"] = 5.0
+cfg["tta"]["reset_threshold"] = math.inf if reset_thr == "inf" else float(reset_thr)
 cfg["tta"]["drift_gate_threshold"] = 0.0
-cfg["tta"]["rollback_threshold"] = 3.0
-cfg["tta"]["rollback_window"] = 20
 
 prereq["device"] = device
 prereq["output_dir"] = outdir
@@ -81,45 +58,35 @@ PY
 
 launch() {
   name=$1
-  base_cfg=$2
-  prereq_cfg=$3
+  adapter_mode=$2
+  k_ratio=$3
+  reset_threshold=$4
   outdir="$RUN_ROOT/$STAMP/$name"
   cfg="$outdir/config.yaml"
-  prereq_dst="$outdir/$(basename "$prereq_cfg")"
+  prereq_dst="$outdir/fed.yaml"
   log="$LOG_DIR/${STAMP}_${name}.log"
   session="mur_aff_${STAMP}_${name}"
   mkdir -p "$outdir"
-  write_cfg "$base_cfg" "$prereq_cfg" "$cfg" "$prereq_dst" "$outdir" \
-    "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}"
+  write_cfg "$ROOT/configs/murata/fed_tta.yaml" "$ROOT/configs/murata/fed.yaml" \
+    "$cfg" "$prereq_dst" "$outdir" "$adapter_mode" "$k_ratio" "$reset_threshold"
   tmux new-session -d -s "$session" \
     "cd $ROOT && $PYTHON -u -m scripts.run_affine_local --config $cfg --max-clients $MAX_CLIENTS --max-workers $MAX_WORKERS > $log 2>&1"
   echo "[$name] session=$session -> $log"
 }
 
 cd "$ROOT"
+echo "=== Murata Affine Scout V2 | stamp=$STAMP | device=$DEVICE | max_clients=$MAX_CLIENTS | max_workers=$MAX_WORKERS ==="
 
-FED_CFG="$ROOT/configs/murata/fed_tta.yaml"
-FED_PREREQ="$ROOT/configs/murata/fed.yaml"
-DLINEAR_CFG="$ROOT/configs/murata/dlinear_tta.yaml"
-DLINEAR_PREREQ="$ROOT/configs/murata/centralized.yaml"
-
-echo "=== Murata Affine Scout | stamp=$STAMP | device=$DEVICE | max_clients=$MAX_CLIENTS | max_workers=$MAX_WORKERS ==="
-
-launch fed_base          "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.10 1.0 5.0 inf
-launch fed_fast_lr       "$FED_CFG" "$FED_PREREQ"         0.25 3e-4 0.3 1.0 0.10 1.0 5.0 inf
-launch fed_short_k       "$FED_CFG" "$FED_PREREQ"         0.125 1e-4 0.3 1.0 0.10 1.0 5.0 inf
-launch fed_long_k        "$FED_CFG" "$FED_PREREQ"         0.50 1e-4 0.3 1.0 0.10 1.0 5.0 inf
-launch fed_cons_low      "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.1 1.0 0.10 1.0 5.0 inf
-launch fed_cons_high     "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.6 1.0 0.10 1.0 5.0 inf
-launch fed_anchor_light  "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.03 1.0 5.0 inf
-launch fed_anchor_strong "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.30 1.0 5.0 inf
-launch fed_boost_soft    "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.10 0.5 3.0 inf
-launch fed_boost_aggr    "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.10 2.0 8.0 inf
-launch fed_reset_guard   "$FED_CFG" "$FED_PREREQ"         0.25 1e-4 0.3 1.0 0.10 1.0 5.0 2.5
-launch dlinear_base      "$DLINEAR_CFG" "$DLINEAR_PREREQ" 0.25 1e-4 0.3 1.0 0.10 1.0 5.0 inf
+launch channel_base               channel_affine 0.25  inf
+launch channel_short_k            channel_affine 0.125 inf
+launch channel_reset_guard        channel_affine 0.25  2.5
+launch time_base                  time_affine    0.25  inf
+launch time_short_k               time_affine    0.125 inf
+launch time_short_k_reset_guard   time_affine    0.125 2.5
 
 echo ""
-echo "Launched 12 scout runs."
+echo "Launched 6 scout runs."
 echo "Monitor:"
-echo "  ls $LOG_DIR/${STAMP}_*.log"
 echo "  grep 'Avg:' $LOG_DIR/${STAMP}_*.log"
+echo "Report:"
+echo "  $PYTHON -m scripts.report_murata_affine_scout --stamp $STAMP"

@@ -36,7 +36,7 @@ from scripts.tta.policy import configure_tta_model
 
 class AffineAdapter(nn.Module):
     """
-    Channel-wise affine output adapter for TTA.
+    Affine output adapter for TTA.
 
     Ŷ_final = γ ⊙ Ŷ_backbone + δ
 
@@ -47,8 +47,10 @@ class AffineAdapter(nn.Module):
 
     Shapes
     ------
-    gamma : [1, 1, C]  broadcast over (batch, time) dims  — init 1
-    delta : [1, 1, C]  broadcast over (batch, time) dims  — init 0
+    channel_affine:
+        gamma, delta : [1, 1, C]
+    time_affine:
+        gamma, delta : [1, pred_len, C]
 
     Design rationale
     ----------------
@@ -58,10 +60,19 @@ class AffineAdapter(nn.Module):
     practically impossible.
     """
 
-    def __init__(self, n_channels: int) -> None:
+    def __init__(
+        self,
+        n_channels: int,
+        pred_len: int = 1,
+        mode: str = "channel_affine",
+    ) -> None:
         super().__init__()
-        self.gamma = nn.Parameter(torch.ones(1, 1, n_channels))
-        self.delta = nn.Parameter(torch.zeros(1, 1, n_channels))
+        if mode not in {"channel_affine", "time_affine"}:
+            raise ValueError(f"Unknown adapter mode: {mode!r}")
+        shape = (1, 1, n_channels) if mode == "channel_affine" else (1, pred_len, n_channels)
+        self.mode = mode
+        self.gamma = nn.Parameter(torch.ones(*shape))
+        self.delta = nn.Parameter(torch.zeros(*shape))
 
     def forward(self, y_hat: torch.Tensor) -> torch.Tensor:
         """Apply affine transform.  y_hat: [B, H, C] → [B, H, C]."""

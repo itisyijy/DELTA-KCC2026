@@ -357,7 +357,11 @@ def run_local_tta_loop(
         fm = prepare_frozen_backbone(fm)
         frozen_models.append(fm)
 
-        adapter = AffineAdapter(channels).to(device)
+        adapter = AffineAdapter(
+            channels,
+            pred_len=pred_len,
+            mode=tta_config.adapter_mode,
+        ).to(device)
         adapters.append(adapter)
 
         opt = torch.optim.Adam(adapter.parameters(), lr=tta_config.lr)
