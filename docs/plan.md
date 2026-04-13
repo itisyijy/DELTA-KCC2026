@@ -1,5 +1,24 @@
 # [논문 연구 계획서] DLinear의 성분 분리 기반 Test-Time Adaptation과 연합학습의 유기적 결합을 통한 강건한 시계열 예측
 
+## 0. KCC 2026-04 실행 계획 요약 (현재까지 수행)
+
+목표: 평균 성능 개선이 아니라 **no-harm + adaptation 비용 절감**을 입증하는 효율 우선 실험으로 전환.
+
+실행 계획:
+- 공통 gate 실험: `drift_gate_threshold ∈ {0.3, 0.5, 1.0}`을 Murata/Solar/Electricity에 동일 적용.
+- 비교군 고정: backbone(FedAvg) vs control(time_affine, drift_gate=0) vs gated.
+- 선택 규칙: 모든 데이터셋에서 상대 MSE 열화 `<= 0.5%` 조건 만족 + 평균 adapt_rate 최소 threshold 선택.
+- 안전한 실행 순서: RAM 이슈로 Murata/Solar 우선 실행 후 Electricity 추가 실행.
+
+정리 산출물:
+- 요약 문서: `docs/kcc_drift_gate_summary.md`
+- 집계 결과: `runs/kcc_drift_gate_sweep/20260413_155652/report_outputs/*`
+- CI 요약: `runs/kcc_drift_gate_sweep/20260413_155652/report_outputs/ci_summary.md`
+
+현재 결과 요약:
+- 공통 threshold는 `gate_1p0` 선택.
+- Murata/Solar에서 adapt_rate 감소가 유의미, Electricity는 감소폭이 작음.
+
 ## 1. 연구 배경 및 목적
 최근 장기 시계열 예측(LTSF) 분야에서 복잡한 Transformer 계열보다 단순한 1계층 선형 모델(LTSF-Linear)이 우수한 성능을 보인다는 사실이 입증되었다. 하지만 실생활 환경(예: 태양광 발전, 전력망)에서는 기상이변이나 사용자 패턴 변화 등으로 예측 불가능한 도메인 시프트(Domain Shift)가 수시로 발생하며, 프라이버시 문제로 인해 데이터를 중앙 서버에 모아 재학습하기 어렵다.
 
