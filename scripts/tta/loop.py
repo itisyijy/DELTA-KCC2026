@@ -263,6 +263,7 @@ def _client_step_worker(
         reset_threshold=tta_config.reset_threshold,
         hard_gate_scale=tta_config.hard_gate_scale,
         hard_gate_min_history=tta_config.hard_gate_min_history,
+        acceptance_margin=tta_config.acceptance_margin,
     )
 
     new_y_prev = result.y_out  # already detached in run_tta_step_affine

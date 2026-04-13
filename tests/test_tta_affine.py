@@ -280,6 +280,29 @@ def test_tta_step_affine_hard_gate_skips_easy_window() -> None:
     assert result.skip_reason == "hard_gate"
 
 
+def test_tta_step_affine_accept_gate_reverts_rejected_update() -> None:
+    model = prepare_frozen_backbone(_model())
+    adapter = _adapter()
+    gamma_before = adapter.gamma.clone()
+    delta_before = adapter.delta.clone()
+    opt = torch.optim.Adam(adapter.parameters(), lr=1e-2)
+    loss_fn = _loss_fn()
+    guard = RollbackGuard(threshold=1e9, tracker=ReconTracker(20))
+    x_input, x_recent = _make_step_inputs()
+
+    result = run_tta_step_affine(
+        frozen_model=model, adapter=adapter, optimizer=opt,
+        loss_fn=loss_fn, x_input=x_input, x_recent=x_recent,
+        y_prev=None, rollback_guard=guard, device=torch.device("cpu"),
+        acceptance_margin=0.999,
+    )
+
+    assert result.skipped
+    assert result.skip_reason == "accept_gate"
+    assert torch.allclose(adapter.gamma, gamma_before)
+    assert torch.allclose(adapter.delta, delta_before)
+
+
 def test_recon_tracker_ignores_nan_in_rolling_mean() -> None:
     tracker = ReconTracker(4)
     tracker.update(float("nan"))
@@ -414,6 +437,7 @@ def _make_tta_config(**overrides):
     cfg = dict(
         grad_clip=1.0, drift_gate_threshold=0.0, reset_threshold=float("inf"),
         hard_gate_scale=0.0, hard_gate_min_history=0,
+        acceptance_margin=-1.0,
         alpha=0.3, beta=1.0, lambda_anchor=0.1, sensitivity=1.0, max_boost=5.0,
         lr=1e-3, rollback_threshold=1e9, rollback_window=20,
     )

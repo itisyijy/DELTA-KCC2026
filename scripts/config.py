@@ -67,6 +67,7 @@ class TTAConfig:
     adapter_mode: str = "channel_affine"
     hard_gate_scale: float = 0.0
     hard_gate_min_history: int = 0
+    acceptance_margin: float = -1.0
 
 
 @dataclass

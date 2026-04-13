@@ -23,6 +23,7 @@ import torch.nn as nn
 
 from scripts.data.dataset import ClientData
 from scripts.models.revin_dlinear import RevINDLinear
+from scripts.tta.acceptance import accepts_update, capture_adapter_state, restore_adapter_state
 from scripts.tta.adapter import AffineAdapter
 from scripts.tta.loss import HybridTTALoss, TTALoss
 from scripts.tta.policy import get_tta_parameters, should_adapt
@@ -269,6 +270,7 @@ def run_tta_step_affine(
     reset_threshold: float = float("inf"),
     hard_gate_scale: float = 0.0,
     hard_gate_min_history: int = 0,
+    acceptance_margin: float = -1.0,
     n_inner: int = 1,
 ) -> TTAStepResultV2:
     """
@@ -340,6 +342,7 @@ def run_tta_step_affine(
         )
 
     # ── Inner gradient steps ──────────────────────────────────────────────────
+    adapter_state = capture_adapter_state(adapter)
     logs: dict[str, float] = {}
     for _ in range(n_inner):
         optimizer.zero_grad()
@@ -367,7 +370,25 @@ def run_tta_step_affine(
         nn.utils.clip_grad_norm_(adapter.parameters(), max_norm=max_grad_norm)
         optimizer.step()
 
-    # ── Gate 4: Anomaly gate — 오차 폭발 시 adapter 리셋 ─────────────────────
+    # ── Gate 4: Acceptance gate — 실제 hindcast 개선 시에만 반영 ───────────────
+    with torch.no_grad():
+        y_post = adapter(frozen_model(x_input_t))
+        l_hind_post = (y_post[:, :k, :] - x_recent_t).pow(2).mean().item()
+    if not accepts_update(l_hind_pre, l_hind_post, acceptance_margin):
+        restore_adapter_state(adapter, adapter_state)
+        rollback_guard.tracker.update(l_hind_pre)
+        return TTAStepResultV2(
+            skipped=True,
+            skip_reason="accept_gate",
+            l_hind=l_hind_pre,
+            l_cons=float("nan"),
+            l_anchor=float("nan"),
+            boost=1.0,
+            reset_applied=False,
+            y_out=y_pre.detach(),
+        )
+
+    # ── Gate 5: Anomaly gate — 오차 폭발 시 adapter 리셋 ─────────────────────
     reset_applied = logs.get("L_hind", 0.0) > reset_threshold
     if reset_applied:
         adapter.reset()
