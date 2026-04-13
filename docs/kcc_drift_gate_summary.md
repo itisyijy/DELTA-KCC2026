@@ -2,6 +2,27 @@
 
 Run root: `/home/jylee/DLinear-Season-Trend/runs/kcc_drift_gate_sweep/20260413_155652`
 
+## Why this summary (purpose)
+
+This summary exists to consolidate the KCC-facing evidence for **efficiency‑first TTA**:
+- We are not claiming average accuracy gains; we are testing **no-harm + lower adaptation cost**.
+- We need a single, shared drift-gate threshold that is defensible across all datasets.
+- The summary packages both the selection rule and the final tables used in the KCC narrative.
+
+## Experiment plan (how it was run)
+
+Design goal: **same backbone, same adapter, same gate candidates across datasets**.
+
+1. Backbone: `FedAvg` (no TTA).
+2. Control: `time_affine` TTA with `k_ratio=0.0625`, `reset_threshold=2.5`, `drift_gate_threshold=0`.
+3. Drift‑gate sweep: `drift_gate_threshold ∈ {0.3, 0.5, 1.0}`.
+4. Selection rule:
+   - All datasets must satisfy `<= 0.5%` relative MSE degradation vs backbone.
+   - Choose the threshold with the **lowest mean adapt rate**.
+   - If no shared threshold passes, fall back to Murata‑only primary.
+
+This run used a **shared stamp** so all datasets could be merged into one report.
+
 Selection rule:
 - Shared threshold that keeps all datasets within `<= 0.5%` relative MSE degradation.
 - Among valid thresholds, choose the one with the lowest mean adapt rate.
