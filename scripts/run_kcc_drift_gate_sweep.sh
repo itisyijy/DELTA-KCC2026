@@ -6,16 +6,32 @@ PYTHON=${PYTHON:-/home/jylee/miniconda3/envs/kcc2026/bin/python}
 DEVICE=${DEVICE:-cuda:1}
 MAX_WORKERS=${MAX_WORKERS:-2}
 DATASETS=${DATASETS:-"murata solar"}
+REUSE_EXISTING=${REUSE_EXISTING:-1}
+LAUNCH_MODE=${LAUNCH_MODE:-parallel}
 STAMP=${STAMP:-$(date +%Y%m%d_%H%M%S)}
 RUN_ROOT="$ROOT/runs/kcc_drift_gate_sweep"
 LOG_DIR="$ROOT/logs"
 STAMP_ROOT="$RUN_ROOT/$STAMP"
 SOURCES="$STAMP_ROOT/sources.tsv"
+QUEUE_SH="$STAMP_ROOT/queue.sh"
 mkdir -p "$STAMP_ROOT" "$LOG_DIR"
 [ -f "$SOURCES" ] || printf "dataset\tkind\tstatus\tpath\n" > "$SOURCES"
+if [ ! -f "$QUEUE_SH" ]; then
+  printf "#!/bin/sh\nset -eu\n" > "$QUEUE_SH"
+fi
 
 record_source() {
   printf "%s\t%s\t%s\t%s\n" "$1" "$2" "$3" "$4" >> "$SOURCES"
+}
+
+schedule_run() {
+  session=$1
+  cmd=$2
+  if [ "$LAUNCH_MODE" = "sequential" ]; then
+    printf "%s\n" "$cmd" >> "$QUEUE_SH"
+  else
+    tmux new-session -d -s "$session" "$cmd"
+  fi
 }
 
 find_existing() {
@@ -100,7 +116,7 @@ launch_backbone() {
   session="kcc_${STAMP}_${dataset}_backbone"
   mkdir -p "$outdir"
   write_backbone_cfg "$ROOT/configs/$dataset/fed_tta.yaml" "$cfg" "$outdir"
-  tmux new-session -d -s "$session" \
+  schedule_run "$session" \
     "cd $ROOT && $PYTHON -u -m scripts.run_backbone_eval --config $cfg > $log 2>&1"
   record_source "$dataset" backbone launched "$outdir"
   echo "[$dataset/backbone] session=$session -> $log"
@@ -115,7 +131,7 @@ launch_control() {
   session="kcc_${STAMP}_${dataset}_control"
   mkdir -p "$outdir"
   write_tta_cfg "$ROOT/configs/$dataset/fed_tta.yaml" "$cfg" "$prereq" "$outdir" 0.0
-  tmux new-session -d -s "$session" \
+  schedule_run "$session" \
     "cd $ROOT && $PYTHON -u -m scripts.run_affine_local --config $cfg --max-workers $MAX_WORKERS > $log 2>&1"
   record_source "$dataset" control launched "$outdir"
   echo "[$dataset/control] session=$session -> $log"
@@ -132,7 +148,7 @@ launch_gate() {
   session="kcc_${STAMP}_${dataset}_${label}"
   mkdir -p "$outdir"
   write_tta_cfg "$ROOT/configs/$dataset/fed_tta.yaml" "$cfg" "$prereq" "$outdir" "$gate"
-  tmux new-session -d -s "$session" \
+  schedule_run "$session" \
     "cd $ROOT && $PYTHON -u -m scripts.run_affine_local --config $cfg --max-workers $MAX_WORKERS > $log 2>&1"
   record_source "$dataset" "$label" launched "$outdir"
   echo "[$dataset/$label] session=$session -> $log"
@@ -141,8 +157,12 @@ launch_gate() {
 echo "=== KCC Drift-Gate Sweep | stamp=$STAMP | device=$DEVICE | max_workers=$MAX_WORKERS ==="
 echo "Datasets: $DATASETS"
 for dataset in $DATASETS; do
-  backbone=$(find_existing "$dataset" backbone)
-  control=$(find_existing "$dataset" control)
+  backbone=""
+  control=""
+  if [ "$REUSE_EXISTING" = "1" ]; then
+    backbone=$(find_existing "$dataset" backbone)
+    control=$(find_existing "$dataset" control)
+  fi
   if [ -n "$backbone" ]; then
     record_source "$dataset" backbone reused "$backbone"
     echo "[$dataset/backbone] reuse -> $backbone"
@@ -159,6 +179,12 @@ for dataset in $DATASETS; do
   launch_gate "$dataset" gate_0p5 0.5
   launch_gate "$dataset" gate_1p0 1.0
 done
+
+if [ "$LAUNCH_MODE" = "sequential" ]; then
+  session="kcc_${STAMP}_seq"
+  tmux new-session -d -s "$session" "sh $QUEUE_SH"
+  echo "Sequential queue session: $session -> $QUEUE_SH"
+fi
 
 echo ""
 echo "Sources manifest: $SOURCES"

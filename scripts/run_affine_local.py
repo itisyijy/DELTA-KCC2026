@@ -13,7 +13,9 @@ from scripts.cli import apply_cli_overrides, build_parser
 from scripts.config import ExperimentConfig, load_config
 from scripts.data.dataset import ClientData
 from scripts.data.loader import load_csv_as_clients, load_parquet_as_clients
+from scripts.tta.adapter import AffineAdapter
 from scripts.tta.loop import run_local_tta_loop
+from scripts.utils.efficiency import RunEfficiency, count_parameters
 from scripts.utils.run_logging import tee_run_output
 from scripts.utils.tools import make_run_dir, save_results, seed_everything
 
@@ -88,8 +90,16 @@ def main(argv: list[str] | None = None) -> None:
                 baseline_runners=BASELINE_RUNNERS,
             )
 
+        global_model = load_model(config, device)
+        adapter = AffineAdapter(
+            global_model.revin.num_features,
+            pred_len=config.model.pred_len,
+            mode=config.tta.adapter_mode,
+        )
+        efficiency = RunEfficiency(device)
+        efficiency.start()
         per_client, per_client_diagnostics, diagnostic_summary = run_local_tta_loop(
-            global_model=load_model(config, device),
+            global_model=global_model,
             clients=clients,
             seq_len=config.model.seq_len,
             pred_len=config.model.pred_len,
@@ -97,6 +107,7 @@ def main(argv: list[str] | None = None) -> None:
             tta_config=config.tta,
             device=device,
             max_workers=max(1, args.max_workers),
+            efficiency=efficiency,
         )
         avg = _aggregate(per_client)
         print(
@@ -121,6 +132,11 @@ def main(argv: list[str] | None = None) -> None:
             "avg": avg,
             "diagnostic_summary": diagnostic_summary,
             "max_workers": max(1, args.max_workers),
+            **efficiency.payload(
+                seed=config.seed,
+                trainable_params=count_parameters(adapter),
+                total_backbone_params=count_parameters(global_model),
+            ),
         }
         save_results(run_dir, payload, dataclasses.asdict(config))
 

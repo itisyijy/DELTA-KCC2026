@@ -13,6 +13,7 @@ from scripts.config import ExperimentConfig, load_config
 from scripts.data.dataset import ClientData
 from scripts.data.loader import load_csv_as_clients, load_parquet_as_clients
 from scripts.tta.engine import evaluate_client
+from scripts.utils.efficiency import RunEfficiency, count_parameters
 from scripts.utils.metrics import wasserstein_noniid
 from scripts.utils.run_logging import tee_run_output
 from scripts.utils.tools import make_run_dir, save_results, seed_everything
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> None:
         clients = _load_clients(config)
         print(f"  Loaded {len(clients)} clients.")
         model = load_model(config, device)
+        efficiency = RunEfficiency(device)
+        efficiency.start()
         per_client = {
             client.client_id: evaluate_client(
                 model=model,
@@ -74,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
                 seq_len=config.model.seq_len,
                 pred_len=config.model.pred_len,
                 device=device,
+                efficiency=efficiency,
             )
             for client in clients
         }
@@ -85,7 +89,17 @@ def main(argv: list[str] | None = None) -> None:
         )
         save_results(
             run_dir,
-            {"engine": "backbone_eval", "per_client": per_client, "avg": avg, "wasserstein_noniid": wd},
+            {
+                "engine": "backbone_eval",
+                "per_client": per_client,
+                "avg": avg,
+                "wasserstein_noniid": wd,
+                **efficiency.payload(
+                    seed=config.seed,
+                    trainable_params=0,
+                    total_backbone_params=count_parameters(model),
+                ),
+            },
             dataclasses.asdict(config),
         )
 

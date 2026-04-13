@@ -3,6 +3,8 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import threading
+from time import perf_counter
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -29,6 +31,9 @@ from scripts.tta.policy import get_tta_parameters
 from scripts.utils.metrics import mae, mse, smape, inverse_global_scale
 from scripts.utils.run_logging import MilestoneLogger
 
+if TYPE_CHECKING:
+    from scripts.utils.efficiency import RunEfficiency
+
 
 def run_fed_tta_loop(
     *,
@@ -40,6 +45,7 @@ def run_fed_tta_loop(
     tta_config: TTAConfig,
     feedback_config: FeedbackConfig,
     device: torch.device,
+    efficiency: "RunEfficiency | None" = None,
 ) -> dict[str, dict[str, float]]:
     """
     Run the FED-TTA Loop over all clients' test splits.
@@ -105,11 +111,13 @@ def run_fed_tta_loop(
         for ci, (client, cm, (anchor_t, anchor_s), am, guard, opt) in enumerate(
             zip(clients, client_models, client_anchors, client_anchor_models, client_guards, client_optimizers)
         ):
+            step_start = perf_counter()
             inputs = build_hindcast_inputs(client.values, t_abs, seq_len, k)
             if inputs is None:
                 continue
             x_input, x_recent = inputs
 
+            adapt_start = perf_counter()
             result = run_tta_step(
                 model=cm,
                 optimizer=opt,
@@ -127,6 +135,7 @@ def run_fed_tta_loop(
                 min_active_frac=tta_config.min_active_frac,
                 anchor_model=am,
             )
+            adapt_sec = perf_counter() - adapt_start
 
             if not result.skipped:
                 dt, ds = compute_delta(cm, anchor_t, anchor_s)
@@ -156,6 +165,8 @@ def run_fed_tta_loop(
                 if len(target) == pred_len:
                     all_preds[ci].append(pred)
                     all_targets[ci].append(target)
+            if efficiency is not None:
+                efficiency.record_round(perf_counter() - step_start, adapt_sec)
 
         # --- Server feedback ---
         aggregated = aggregate_deltas(client_deltas, feedback_config.decay_factor)
@@ -214,7 +225,15 @@ def _client_step_worker(
     loss_fn: HybridTTALoss,
     tta_config: "TTAConfig",
     device: torch.device,
-) -> tuple[int, torch.Tensor | None, "np.ndarray | None", "np.ndarray | None", TTAStepResultV2 | None]:
+) -> tuple[
+    int,
+    torch.Tensor | None,
+    "np.ndarray | None",
+    "np.ndarray | None",
+    TTAStepResultV2 | None,
+    float,
+    float,
+]:
     """
     한 시점(t_abs)에서 한 클라이언트의 TTA 스텝을 처리. ThreadPoolExecutor 워커용.
 
@@ -233,19 +252,21 @@ def _client_step_worker(
 
     Returns
     -------
-    (ci, new_y_prev, pred_np, target_np)
+    (ci, new_y_prev, pred_np, target_np, result, step_sec, adapt_sec)
     """
     # 워커 스레드 최초 실행 시에만 설정 (threading.local 사용)
     if not getattr(_tls, "num_threads_set", False):
         torch.set_num_threads(1)
         _tls.num_threads_set = True
 
+    step_start = perf_counter()
     inputs = build_hindcast_inputs(client.values, t_abs, seq_len, k)
     if inputs is None:
-        return ci, y_prev, None, None, None
+        return ci, y_prev, None, None, None, perf_counter() - step_start, 0.0
 
     x_input, x_recent = inputs
 
+    adapt_start = perf_counter()
     result = run_tta_step_affine(
         frozen_model=fm,
         adapter=adapter,
@@ -265,6 +286,7 @@ def _client_step_worker(
         hard_gate_min_history=tta_config.hard_gate_min_history,
         acceptance_margin=tta_config.acceptance_margin,
     )
+    adapt_sec = perf_counter() - adapt_start
 
     new_y_prev = result.y_out  # already detached in run_tta_step_affine
 
@@ -286,7 +308,7 @@ def _client_step_worker(
         else:
             pred_np = None  # target 길이 불일치 시 둘 다 버림
 
-    return ci, new_y_prev, pred_np, target_np, result
+    return ci, new_y_prev, pred_np, target_np, result, perf_counter() - step_start, adapt_sec
 
 
 def run_local_tta_loop(
@@ -299,6 +321,7 @@ def run_local_tta_loop(
     tta_config: "TTAConfig",
     device: torch.device,
     max_workers: int = 1,
+    efficiency: "RunEfficiency | None" = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], dict[str, float]]:
     """
     Affine-Adapter TTA: 백본 완전 동결, 클라이언트별 AffineAdapter(γ,δ) 만 업데이트.
@@ -405,12 +428,14 @@ def run_local_tta_loop(
                 for ci, (client, fm, adapter, opt, guard) in enumerate(
                     zip(clients, frozen_models, adapters, optimizers, guards)
                 ):
-                    _, new_y_prev, pred_np, target_np, result = _client_step_worker(
+                    _, new_y_prev, pred_np, target_np, result, step_sec, adapt_sec = _client_step_worker(
                         ci=ci, client=client, fm=fm, adapter=adapter,
                         opt=opt, guard=guard, y_prev=y_prevs[ci],
                         t_abs=t_abs, seq_len=seq_len, pred_len=pred_len, k=k,
                         loss_fn=loss_fn, tta_config=tta_config, device=device,
                     )
+                    if efficiency is not None:
+                        efficiency.record_round(step_sec, adapt_sec)
                     diagnostics[ci].update(
                         result,
                         gamma_l1=float((adapter.gamma - 1.0).abs().mean().item()),
@@ -440,8 +465,23 @@ def run_local_tta_loop(
 
                 # Step 2: 결과 수집 (메인 스레드에서 순차적으로)
                 #   y_prevs 쓰기는 모든 future가 완료된 후 메인 스레드에서만 수행
+                step_results = [None] * len(clients)
                 for future in concurrent.futures.as_completed(futures):
-                    ci, new_y_prev, pred_np, target_np, result = future.result()
+                    ci, new_y_prev, pred_np, target_np, result, step_sec, adapt_sec = future.result()
+                    step_results[ci] = (
+                        new_y_prev,
+                        pred_np,
+                        target_np,
+                        result,
+                        step_sec,
+                        adapt_sec,
+                    )
+                for ci, payload in enumerate(step_results):
+                    if payload is None:
+                        continue
+                    new_y_prev, pred_np, target_np, result, step_sec, adapt_sec = payload
+                    if efficiency is not None:
+                        efficiency.record_round(step_sec, adapt_sec)
                     diagnostics[ci].update(
                         result,
                         gamma_l1=float((adapters[ci].gamma - 1.0).abs().mean().item()),

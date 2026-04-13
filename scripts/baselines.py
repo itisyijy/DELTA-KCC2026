@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -21,6 +22,7 @@ from scripts.tta.policy import get_tta_parameters
 from scripts.utils.metrics import inverse_global_scale, mae, mse, smape, wasserstein_noniid
 from scripts.utils.run_logging import MilestoneLogger
 from scripts.utils.tools import save_results
+from scripts.utils.efficiency import RunEfficiency, count_parameters
 
 
 def _aggregate_metrics(per_client: dict[str, dict[str, float]]) -> dict[str, float]:
@@ -38,6 +40,12 @@ def _save_metrics(run_dir: Path, config: ExperimentConfig, payload: dict) -> Non
     save_results(run_dir, payload, dataclasses.asdict(config))
 
 
+def _tta_param_counts(model: RevINDLinear, update_scope: str) -> tuple[int, int]:
+    probe = copy.deepcopy(model)
+    probe, _, _ = prepare_tta_model(probe, update_scope)
+    return count_parameters(probe, trainable_only=True), count_parameters(model)
+
+
 def _run_supervised_baseline(
     config: ExperimentConfig,
     clients: list[ClientData],
@@ -49,6 +57,8 @@ def _run_supervised_baseline(
     checkpoint_path_override: str | Path | None,
 ) -> None:
     model = trainer(config, clients, device, checkpoint_path_override=checkpoint_path_override)
+    efficiency = RunEfficiency(device)
+    efficiency.start()
     per_client = {
         client.client_id: evaluate_client(
             model=model,
@@ -56,6 +66,7 @@ def _run_supervised_baseline(
             seq_len=config.model.seq_len,
             pred_len=config.model.pred_len,
             device=device,
+            efficiency=efficiency,
         )
         for client in clients
     }
@@ -66,7 +77,17 @@ def _run_supervised_baseline(
         extras["wasserstein_noniid"] = wasserstein_noniid(clients)
         suffix = f"  Non-IID(W)={extras['wasserstein_noniid']:.4f}"
     print(f"\n[{label}] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  sMAPE={avg['smape']:.2f}%{suffix}")
-    _save_metrics(run_dir, config, {"per_client": per_client, "avg": avg, **extras})
+    payload = {
+        "per_client": per_client,
+        "avg": avg,
+        **extras,
+        **efficiency.payload(
+            seed=config.seed,
+            trainable_params=0,
+            total_backbone_params=count_parameters(model),
+        ),
+    }
+    _save_metrics(run_dir, config, payload)
 
 
 def _count_tta_steps(clients: list[ClientData], seq_len: int, k: int) -> int:
@@ -89,6 +110,9 @@ def _run_tta_eval(
     tta_loss_fn = TTALoss(k=k, alpha=config.tta.alpha, lambda0=config.tta.lambda0, gamma=config.tta.gamma, lambda_func=config.tta.lambda_func, hindcast_mask_threshold=config.tta.hindcast_mask_threshold)
     per_client: dict[str, dict[str, float]] = {}
     completed_steps = 0
+    trainable_params, total_backbone_params = _tta_param_counts(model, config.tta.update_scope)
+    efficiency = RunEfficiency(device)
+    efficiency.start()
     progress.start(detail=f"clients={len(clients)}")
     anchor_model = copy.deepcopy(model).to(device).eval() if config.tta.lambda_func > 0.0 else None
     for param in (anchor_model.parameters() if anchor_model else []):
@@ -112,11 +136,13 @@ def _run_tta_eval(
         test_s, test_e = client.split_indices["test"]
         for t_abs in range(test_s + config.model.seq_len + k - 1, test_e):
             completed_steps += 1
+            step_start = perf_counter()
             inputs = build_hindcast_inputs(client.values, t_abs, config.model.seq_len, k)
             if inputs is None:
                 progress.update(completed_steps)
                 continue
             x_input, x_recent = inputs
+            adapt_start = perf_counter()
             run_tta_step(
                 model=model_copy,
                 optimizer=optimizer,
@@ -134,6 +160,7 @@ def _run_tta_eval(
                 min_active_frac=config.tta.min_active_frac,
                 anchor_model=anchor_model,
             )
+            adapt_sec = perf_counter() - adapt_start
 
             # Update EMA anchor from current model weights (after potential adaptation)
             if ema_beta < 1.0:
@@ -159,6 +186,7 @@ def _run_tta_eval(
                 if len(target) == config.model.pred_len:
                     preds_g.append(pred)
                     targets_g.append(target)
+            efficiency.record_round(perf_counter() - step_start, adapt_sec)
             progress.update(completed_steps)
         if preds_g:
             preds_arr = np.concatenate(preds_g, axis=0)
@@ -176,7 +204,16 @@ def _run_tta_eval(
     avg = _aggregate_metrics(per_client)
     progress.finish(detail=f"clients={len(clients)}")
     print(f"\n[{label}] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  sMAPE={avg['smape']:.2f}%")
-    _save_metrics(run_dir, config, {"per_client": per_client, "avg": avg})
+    payload = {
+        "per_client": per_client,
+        "avg": avg,
+        **efficiency.payload(
+            seed=config.seed,
+            trainable_params=trainable_params,
+            total_backbone_params=total_backbone_params,
+        ),
+    }
+    _save_metrics(run_dir, config, payload)
 
 
 def run_baseline_centralized(config, clients, device, run_dir, checkpoint_path_override=None) -> None:
@@ -196,8 +233,12 @@ def run_baseline_fed_tta(config, clients, device, run_dir, checkpoint_path_overr
 
 
 def run_baseline_fed_tta_loop(config, clients, device, run_dir, checkpoint_path_override=None) -> None:
+    model = load_model(config, device)
+    trainable_params, total_backbone_params = _tta_param_counts(model, config.tta.update_scope)
+    efficiency = RunEfficiency(device)
+    efficiency.start()
     per_client = run_fed_tta_loop(
-        global_model=load_model(config, device),
+        global_model=model,
         clients=clients,
         seq_len=config.model.seq_len,
         pred_len=config.model.pred_len,
@@ -205,11 +246,22 @@ def run_baseline_fed_tta_loop(config, clients, device, run_dir, checkpoint_path_
         tta_config=config.tta,
         feedback_config=config.feedback,
         device=device,
+        efficiency=efficiency,
     )
     avg = _aggregate_metrics(per_client)
     wd = wasserstein_noniid(clients)
     print(f"\n[FED-TTA Loop] Avg: MSE={avg['mse']:.4f}  MAE={avg['mae']:.4f}  sMAPE={avg['smape']:.2f}%  Non-IID(W)={wd:.4f}")
-    _save_metrics(run_dir, config, {"per_client": per_client, "avg": avg, "wasserstein_noniid": wd})
+    payload = {
+        "per_client": per_client,
+        "avg": avg,
+        "wasserstein_noniid": wd,
+        **efficiency.payload(
+            seed=config.seed,
+            trainable_params=trainable_params,
+            total_backbone_params=total_backbone_params,
+        ),
+    }
+    _save_metrics(run_dir, config, payload)
 
 
 BASELINE_RUNNERS = {

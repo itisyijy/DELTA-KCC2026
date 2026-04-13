@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from time import perf_counter
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -28,6 +30,9 @@ from scripts.tta.adapter import AffineAdapter
 from scripts.tta.loss import HybridTTALoss, TTALoss
 from scripts.tta.policy import get_tta_parameters, should_adapt
 from scripts.utils.metrics import mae, mse, smape, inverse_global_scale
+
+if TYPE_CHECKING:
+    from scripts.utils.efficiency import RunEfficiency
 
 
 class ReconTracker:
@@ -203,6 +208,7 @@ def evaluate_client(
     seq_len: int,
     pred_len: int,
     device: torch.device,
+    efficiency: "RunEfficiency | None" = None,
 ) -> dict[str, float]:
     """Standard evaluation over one client's test split."""
     model.eval()
@@ -213,12 +219,15 @@ def evaluate_client(
 
     with torch.no_grad():
         for start in range(test_s, test_e - seq_len - pred_len + 1):
+            step_start = perf_counter()
             x = test_data[start : start + seq_len]
             y = test_data[start + seq_len : start + seq_len + pred_len]
             x_t = torch.from_numpy(x).unsqueeze(0).to(device)
             pred = model(x_t).cpu().numpy()[0]
             preds_global.append(pred)
             targets_global.append(y)
+            if efficiency is not None:
+                efficiency.record_round(perf_counter() - step_start, 0.0)
 
     if not preds_global:
         return {"mse": float("nan"), "mae": float("nan"), "smape": float("nan")}
