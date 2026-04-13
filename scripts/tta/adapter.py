@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from scripts.models.revin_dlinear import RevINDLinear
 from scripts.tta.policy import configure_tta_model
@@ -51,6 +52,9 @@ class AffineAdapter(nn.Module):
         gamma, delta : [1, 1, C]
     time_affine:
         gamma, delta : [1, pred_len, C]
+    horizon_conv:
+        gamma : [1, 3, C]  (identity anchor = all ones)
+        delta : [1, 1, C]
 
     Design rationale
     ----------------
@@ -67,15 +71,35 @@ class AffineAdapter(nn.Module):
         mode: str = "channel_affine",
     ) -> None:
         super().__init__()
-        if mode not in {"channel_affine", "time_affine"}:
+        if mode not in {"channel_affine", "time_affine", "horizon_conv"}:
             raise ValueError(f"Unknown adapter mode: {mode!r}")
-        shape = (1, 1, n_channels) if mode == "channel_affine" else (1, pred_len, n_channels)
+        if mode == "channel_affine":
+            shape = (1, 1, n_channels)
+            delta_shape = shape
+        elif mode == "time_affine":
+            shape = (1, pred_len, n_channels)
+            delta_shape = shape
+        else:
+            shape = (1, 3, n_channels)
+            delta_shape = (1, 1, n_channels)
         self.mode = mode
         self.gamma = nn.Parameter(torch.ones(*shape))
-        self.delta = nn.Parameter(torch.zeros(*shape))
+        self.delta = nn.Parameter(torch.zeros(*delta_shape))
 
     def forward(self, y_hat: torch.Tensor) -> torch.Tensor:
         """Apply affine transform.  y_hat: [B, H, C] → [B, H, C]."""
+        if self.mode == "horizon_conv":
+            weights = torch.stack(
+                [
+                    self.gamma[:, 0, :] - 1.0,
+                    self.gamma[:, 1, :],
+                    self.gamma[:, 2, :] - 1.0,
+                ],
+                dim=-1,
+            ).permute(1, 0, 2).contiguous()
+            x = F.pad(y_hat.transpose(1, 2), (1, 1), mode="replicate")
+            mixed = F.conv1d(x, weights, groups=y_hat.shape[-1]).transpose(1, 2)
+            return mixed + self.delta
         return self.gamma * y_hat + self.delta
 
     @torch.no_grad()
