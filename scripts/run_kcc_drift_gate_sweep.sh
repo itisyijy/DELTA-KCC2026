@@ -4,14 +4,15 @@ set -eu
 ROOT=/home/jylee/DLinear-Season-Trend
 PYTHON=${PYTHON:-/home/jylee/miniconda3/envs/kcc2026/bin/python}
 DEVICE=${DEVICE:-cuda:1}
-MAX_WORKERS=${MAX_WORKERS:-4}
+MAX_WORKERS=${MAX_WORKERS:-2}
+DATASETS=${DATASETS:-"murata solar"}
+STAMP=${STAMP:-$(date +%Y%m%d_%H%M%S)}
 RUN_ROOT="$ROOT/runs/kcc_drift_gate_sweep"
 LOG_DIR="$ROOT/logs"
-STAMP=$(date +%Y%m%d_%H%M%S)
 STAMP_ROOT="$RUN_ROOT/$STAMP"
 SOURCES="$STAMP_ROOT/sources.tsv"
 mkdir -p "$STAMP_ROOT" "$LOG_DIR"
-printf "dataset\tkind\tstatus\tpath\n" > "$SOURCES"
+[ -f "$SOURCES" ] || printf "dataset\tkind\tstatus\tpath\n" > "$SOURCES"
 
 record_source() {
   printf "%s\t%s\t%s\t%s\n" "$1" "$2" "$3" "$4" >> "$SOURCES"
@@ -138,7 +139,8 @@ launch_gate() {
 }
 
 echo "=== KCC Drift-Gate Sweep | stamp=$STAMP | device=$DEVICE | max_workers=$MAX_WORKERS ==="
-for dataset in murata electricity solar; do
+echo "Datasets: $DATASETS"
+for dataset in $DATASETS; do
   backbone=$(find_existing "$dataset" backbone)
   control=$(find_existing "$dataset" control)
   if [ -n "$backbone" ]; then
@@ -162,3 +164,5 @@ echo ""
 echo "Sources manifest: $SOURCES"
 echo "Monitor:"
 echo "  grep 'Avg:' $LOG_DIR/${STAMP}_*.log"
+echo "Resume with same stamp:"
+echo "  STAMP=$STAMP DATASETS=\"electricity\" sh scripts/run_kcc_drift_gate_sweep.sh"
