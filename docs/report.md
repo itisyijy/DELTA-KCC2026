@@ -55,6 +55,77 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 | Solar | 288 | 96 | 73 |
 | Electricity | 336 | 96 | 25 |
 
+### 2.4 데이터셋 및 버전별 하이퍼파라미터
+
+#### 2.4.1 데이터셋별 backbone 학습 하이퍼파라미터
+
+| 데이터셋 | 샘플링 간격 | seq_len | pred_len | kernel_size | batch | 학습률 | 중앙학습 | 연합학습 | 공통 설정 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Murata | 15분 | 192 | 96 | 49 | 256 | 0.001 | 15 epoch, patience 7 | local epoch 3, global round 15 | `individual=false`, `revin_affine=true`, `seed=0` |
+| Solar | 10분 | 288 | 96 | 73 | 256 | 0.001 | 15 epoch, patience 7 | local epoch 3, global round 15 | `individual=false`, `revin_affine=true`, `seed=0` |
+| Electricity | 1시간 | 336 | 96 | 25 | 256 | 0.001 | 15 epoch, patience 7 | local epoch 3, global round 15 | `individual=false`, `revin_affine=true`, `seed=0` |
+
+#### 2.4.2 V1~V2 기본 5개 베이스라인 하이퍼파라미터
+
+V1과 V2에서 사용한 5개 베이스라인은 데이터셋별 backbone 설정만 다르고, TTA와 loop 파라미터 구조는 동일했습니다.
+
+| 실험 타입 | 시작점 | 업데이트 대상 | k_ratio | alpha | lambda0 | gamma | TTA lr | grad clip | rollback | 추가 파라미터 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Centralized | 원시 데이터 | 없음 | - | - | - | - | 0.001 | - | - | epoch 15, patience 7 |
+| FedAvg | 원시 데이터 | 없음 | - | - | - | - | 0.001 | - | - | local epoch 3, global round 15 |
+| DLinear-TTA | 중앙학습 checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 centralized |
+| FED-TTA | FedAvg checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 federated |
+| FED-TTA Loop | FedAvg checkpoint | trend/season weight 직접 수정 + 서버 피드백 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | `delta_clip_norm=1.0`, `decay_factor=0.9` |
+
+#### 2.4.3 V3 Murata direct-weight 안정화 하이퍼파라미터
+
+이 단계는 Murata 전용 실험이었습니다. 공통 설정은 `lr=1e-4`, `update_scope=norm`, `k_ratio=0.25`, `alpha=1.0`, `lambda0=1.0`, `gamma=1.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`, `ema_beta=1.0`입니다.
+
+| 실험 버전 | hindcast_mask_threshold | min_active_frac | 목적 |
+| --- | ---: | ---: | --- |
+| baseline_norm | 0.0 | 0.0 | norm-only direct update 기준선입니다. |
+| m1_mask_t0p1 | 0.1 | 0.0 | inactive 구간을 hindcast 계산에서 제외합니다. |
+| m3_skip_0p3 | 0.0 | 0.3 | inactive window 자체를 skip합니다. |
+| comb_m1m3_t0p1_f0p3 | 0.1 | 0.3 | masking과 skip을 동시에 적용합니다. |
+
+#### 2.4.4 V4~V6 Murata affine adapter 계열 하이퍼파라미터
+
+Affine 계열로 전환한 뒤에는 backbone을 동결하고 adapter만 업데이트했습니다. 공통 설정은 `lr=1e-4`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `sensitivity=1.0`, `max_boost=5.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`입니다.
+
+| 버전 | 실험 이름 | adapter_mode | k_ratio | reset_threshold | hard_gate_scale | acceptance_margin | 비고 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| V4 | channel_base | channel_affine | 0.25 | inf | - | - | channel-wise 기준선입니다. |
+| V4 | channel_short_k | channel_affine | 0.125 | inf | - | - | short-k만 반영했습니다. |
+| V4 | time_base | time_affine | 0.25 | inf | - | - | time-wise 기준선입니다. |
+| V4 | time_short_k | time_affine | 0.125 | inf | - | - | time-wise + short-k입니다. |
+| V4 | time_short_k_reset_guard | time_affine | 0.125 | 2.5 | - | - | reset guard를 처음 반영했습니다. |
+| V5 | time_k00625_reset2p5 | time_affine | 0.0625 | 2.5 | - | - | Murata 주력 설계의 최종 control입니다. |
+| V5 | time_k0125_reset1p5 | time_affine | 0.125 | 1.5 | - | - | reset을 더 공격적으로 적용했습니다. |
+| V5 | time_k0125_reset2p5 | time_affine | 0.125 | 2.5 | - | - | short-k보다 긴 hindcast를 비교했습니다. |
+| V5 | time_k0125_reset4p0 | time_affine | 0.125 | 4.0 | - | - | reset을 느슨하게 적용했습니다. |
+| V6 | time_best_control | time_affine | 0.0625 | 2.5 | 0.0 | - | hard gate 비교용 기준선입니다. |
+| V6 | time_gate1p00 | time_affine | 0.0625 | 2.5 | 1.00 | - | `hard_gate_min_history=20`입니다. |
+| V6 | time_gate1p02 | time_affine | 0.0625 | 2.5 | 1.02 | - | `hard_gate_min_history=20`입니다. |
+| V6 | time_gate1p05 | time_affine | 0.0625 | 2.5 | 1.05 | - | `hard_gate_min_history=20`입니다. |
+| V6 | time_gate1p10 | time_affine | 0.0625 | 2.5 | 1.10 | - | `hard_gate_min_history=20`입니다. |
+| V6 | conv_base | horizon_conv | 0.0625 | 2.5 | 0.0 | - | adapter 구조만 horizon-conv로 교체했습니다. |
+| V6 | conv_hgate1p10 | horizon_conv | 0.0625 | 2.5 | 1.10 | - | horizon-conv + hard gate입니다. |
+| V6 | time_control | time_affine | 0.0625 | 2.5 | 0.0 | -1.0 | selective activation 비교용 기준선입니다. |
+| V6 | accept_nonworse | time_affine | 0.0625 | 2.5 | 0.0 | 0.0 | 손실이 나빠지지 않을 때만 수용합니다. |
+| V6 | accept_0p25pct | time_affine | 0.0625 | 2.5 | 0.0 | 0.0025 | 0.25% 이상 개선 시만 수용합니다. |
+| V6 | accept_0p50pct | time_affine | 0.0625 | 2.5 | 0.0 | 0.005 | 0.50% 이상 개선 시만 수용합니다. |
+
+#### 2.4.5 Electricity, Solar 전이 점검용 affine 하이퍼파라미터
+
+Murata에서 고른 time-affine 설계를 Electricity와 Solar에 그대로 이식해 비교했습니다. 공통 설정은 `adapter_mode=time_affine`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `lr=1e-4`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `reset_threshold=2.5`입니다.
+
+| 데이터셋 | 실험 버전 | k_ratio | 비고 |
+| --- | --- | ---: | --- |
+| Electricity | time_k00625_reset2p5 | 0.0625 | Fed backbone 위에서 time-affine를 적용했습니다. |
+| Electricity | time_k0125_reset2p5 | 0.125 | 더 긴 hindcast를 비교했습니다. |
+| Solar | time_k00625_reset2p5 | 0.0625 | Fed backbone 위에서 time-affine를 적용했습니다. |
+| Solar | time_k0125_reset2p5 | 0.125 | 더 긴 hindcast를 비교했습니다. |
+
 ## 3. 변경 히스토리
 
 | 날짜 | 버전 | 핵심 변경 | 변경 이유 |
