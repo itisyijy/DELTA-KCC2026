@@ -41,7 +41,168 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 5. rollback guard, hard gate, acceptance gate로 불안정한 업데이트를 건너뜁니다.
 6. loop 모드에서는 수용된 변화량만 서버에 반영하고, anchor와 optimizer state를 함께 갱신합니다.
 
-### 2.3 공통 실험 설정
+### 2.3 내부 손실 함수 설계와 변화
+
+#### 2.3.1 Legacy direct-weight TTA 손실
+
+초기 DLST는 DLinear backbone의 trend/season 가중치를 직접 수정하는 방식으로 TTA를 수행했습니다. 이 시기의 기본 목적함수는 다음과 같습니다.
+
+\[
+\mathcal{L}_{legacy}
+= \mathcal{L}_{hind}
++ \alpha \mathcal{L}_{reg}
++ \lambda_{func}\mathcal{L}_{func}
+\]
+
+여기서 각 항의 의미는 다음과 같습니다.
+
+1. Hindcast self-reconstruction loss
+
+\[
+\mathcal{L}_{hind}
+= \frac{1}{k}\sum_{i=1}^{k}\left\|\hat{y}_{i}-x^{recent}_{i}\right\|^{2}
+\]
+
+현재 시점 직전의 최근 관측 구간을 라벨 대용 신호로 사용해, 예측의 앞부분 \(k\) step이 실제 최근 관측값을 복원하도록 강제했습니다. 이는 완전한 비지도 TTA 환경에서 사용할 수 있는 가장 직접적인 self-supervised objective 역할을 했습니다.
+
+2. Dynamic component regularization
+
+\[
+\mathcal{L}_{reg}
+= \lambda_{trend}\left\|W^{TTA}_{trend}-W^{anchor}_{trend}\right\|^{2}
++ \lambda_{season}\left\|W^{TTA}_{season}-W^{anchor}_{season}\right\|^{2}
+\]
+
+\[
+\lambda_{trend}
+= \lambda_{0}\exp\left(-\gamma\frac{|\mu_{curr}-\mu_{hist}|}{\sigma_{hist}}\right)
+\]
+
+\[
+\lambda_{season}
+= \lambda_{0}\exp\left(-\gamma\frac{|\sigma_{curr}-\sigma_{hist}|}{\sigma_{hist}}\right)
+\]
+
+이 항은 backbone drift를 억제하기 위한 weight-space regularization입니다. 평균 이동은 trend 쪽 anchor 보존 강도를, 분산 이동은 season 쪽 anchor 보존 강도를 조절하도록 분리했습니다. 즉, 도메인 시프트가 약할 때는 anchor 보존을 강하게 유지하고, 시프트가 클 때는 적응 여지를 더 주는 설계입니다.
+
+3. Functional regularization
+
+\[
+\mathcal{L}_{func}
+= \left\|\hat{y}_{TTA}-\hat{y}_{anchor}\right\|^{2}
+\]
+
+후속 단계에서는 출력 공간에서 anchor 예측과의 괴리를 직접 억제하는 functional regularization을 추가했습니다. 이는 weight-space 규제만으로는 예측 함수의 국소 변형을 충분히 제어하지 못한다는 판단에 따른 보완입니다.
+
+또한 Murata 안정화 단계에서는 inactive 구간이 hindcast 손실을 과도하게 지배하지 않도록 near-zero masking과 inactive-window skip을 추가했습니다. 이 변화는 손실 함수 자체를 바꾸기보다는, 유효한 self-supervision이 존재하는 구간에서만 손실을 계산하도록 만드는 데이터 선택 규칙에 가깝습니다.
+
+#### 2.3.2 Affine adapter hybrid 손실
+
+직접 weight update가 고차원 파라미터 공간에서 불안정하다는 점이 확인된 뒤, 후속 버전에서는 backbone을 완전히 동결하고 저차원 adapter만 업데이트하도록 바꿨습니다. 이 시기의 예측은 다음과 같이 표현할 수 있습니다.
+
+\[
+\hat{Y}_{final} = \mathcal{A}_{\phi}(\hat{Y}_{backbone})
+\]
+
+여기서 \(\mathcal{A}_{\phi}\)는 channel-wise affine, time-wise affine, 또는 horizon-conv adapter입니다. 가장 주력으로 사용한 time-affine의 경우 \(\phi=(\gamma,\delta)\)이며,
+
+\[
+\hat{Y}_{final} = \gamma \odot \hat{Y}_{backbone} + \delta
+\]
+
+로 정의됩니다. 이때 \(\gamma, \delta\)만 학습되므로 적응 자유도가 매우 작고, backbone의 시계열 동역학 자체는 유지됩니다.
+
+이 단계의 목적함수는 다음과 같습니다.
+
+\[
+\mathcal{L}_{affine}
+= \alpha_{eff}\mathcal{L}_{cons}
++ \beta_{eff}\mathcal{L}_{hind}
++ \lambda_{anchor}\mathcal{L}_{anchor}
+\]
+
+1. Hindcast grounding loss
+
+\[
+\mathcal{L}_{hind}
+= \frac{1}{k}\sum_{i=1}^{k}\left\|\hat{y}^{curr}_{i}-x^{recent}_{i}\right\|^{2}
+\]
+
+여전히 실제 최근 관측값을 가장 중요한 grounding signal로 사용했습니다.
+
+2. Temporal consistency loss
+
+\[
+\mathcal{L}_{cons}
+= \frac{1}{H-1}\sum_{i=1}^{H-1}\left\|\hat{y}^{curr}_{i}-\text{sg}\left(\hat{y}^{prev}_{i+1}\right)\right\|^{2}
+\]
+
+여기서 \(\text{sg}(\cdot)\)는 stop-gradient입니다. 이 항은 연속 창 사이에서 예측 함수가 급격히 바뀌는 현상을 줄이는 temporal smoothness prior로 해석할 수 있습니다.
+
+3. Identity-anchor regularization
+
+\[
+\mathcal{L}_{anchor}
+= \frac{\|\gamma-1\|^{2}+\|\delta\|^{2}}{C}
+\]
+
+adapter가 항상 항등변환 근방에 머물도록 제한해, 장기적으로 불필요한 누적 drift가 생기는 것을 막았습니다. 이는 direct-weight TTA에서의 anchor 보존을 저차원 파라미터 공간으로 옮긴 형태라고 볼 수 있습니다.
+
+4. Bounded adaptive weighting
+
+\[
+boost = \min(1 + \rho \cdot \text{sg}(\mathcal{L}_{hind}),\; boost_{max})
+\]
+
+\[
+\alpha_{eff} = \frac{\alpha}{boost},\qquad
+\beta_{eff} = \beta \cdot boost
+\]
+
+즉, 현재 창의 hindcast 오차가 커질수록 일관성 항의 비중은 줄이고, 실제 관측값 복원 항의 비중은 키우도록 설계했습니다. 학술적으로는 self-supervised online adaptation에서 발생하는 `stability-plasticity trade-off`를 창 난이도에 따라 동적으로 조절하는 방식으로 해석할 수 있습니다.
+
+#### 2.3.3 손실 함수 외부의 의사결정 규칙
+
+후속 버전의 hard gate와 acceptance gate는 손실항 그 자체가 아니라, 손실값을 바탕으로 업데이트를 수행할지 말지를 결정하는 메타 규칙입니다.
+
+1. Rollback guard
+현재 창의 사전 hindcast 오차가 과거 rolling mean의 일정 배수를 넘으면 업데이트를 생략합니다.
+
+2. Hard gate
+
+\[
+\mathcal{L}_{hind}^{pre} \ge \tau_{hard}\cdot \bar{\mathcal{L}}_{hind}
+\]
+
+를 만족하는 충분히 어려운 창에서만 적응을 수행합니다. 이는 쉬운 창에서의 불필요한 adaptation을 줄여 효율을 높이는 목적입니다.
+
+3. Acceptance gate
+
+\[
+\mathcal{L}_{hind}^{post} \le (1-m)\mathcal{L}_{hind}^{pre}
+\]
+
+를 만족할 때만 adapter 갱신을 수용합니다. 여기서 \(m\)은 acceptance margin입니다. 즉, 손실이 실제로 개선된 경우에만 업데이트를 채택하는 일종의 one-step line search 근사로 볼 수 있습니다.
+
+4. Reset rule
+업데이트 후 \(\mathcal{L}_{hind}\)가 `reset_threshold`를 넘으면 adapter를 항등변환으로 초기화합니다. 이는 이상치 창에 대한 bounded recovery 장치입니다.
+
+#### 2.3.4 손실 함수 변화의 의미와 실험적 해석
+
+손실 함수의 변천은 단순한 구현 변경이 아니라, `어디를 적응 대상으로 삼을 것인가`에 대한 가설 수정 과정으로 해석할 수 있습니다.
+
+1. 1단계는 backbone weight 자체를 직접 수정하는 고자유도 적응이었습니다.
+이 방식은 표현력은 충분했지만, parameter drift와 feedback instability에 매우 취약했습니다.
+
+2. 2단계는 functional regularization으로 예측 함수의 변화폭을 직접 억제하려는 시도였습니다.
+Murata의 legacy FED-TTA에서는 \(\lambda_{func}=0.5 \rightarrow 2.0\)로 갈수록 MSE가 `0.3171 -> 0.3141`로 완만하게 줄어, 출력 공간 규제가 부분적인 안정화 효과를 보였습니다. 반면 Electricity FED-TTA에서는 같은 sweep에서 MSE가 `0.2599 -> 0.2740`으로 악화되어, 이 보정이 데이터셋 전반에 일관되게 작동하지는 않았습니다.
+
+3. 3단계는 적응 대상을 backbone에서 adapter로 축소하고, 손실도 weight anchoring 중심에서 `grounding + temporal consistency + identity anchoring` 중심으로 재구성한 단계였습니다.
+학술적으로는 고차원 비선형 함수 자체를 업데이트하는 대신, 이미 학습된 예측 함수 위에 저차원 보정층을 얹는 residual correction 관점에 가깝습니다. 이 전환 이후 catastrophic failure가 크게 줄었고, Murata에서는 backbone에 거의 근접한 수준까지 회복했습니다.
+
+요약하면, DLST의 손실 함수 변화는 `강한 적응`에서 `제한된 적응`, `weight-space 규제`에서 `function-space 및 low-dimensional correction`, `항상 적응`에서 `선택적으로 적응`으로 이동한 과정이라고 정리할 수 있습니다.
+
+### 2.4 공통 실험 설정
 
 - 장비는 모두 `cuda:1` 기준으로 실행했습니다.
 - 실험은 모두 백그라운드 세션 기준으로 운영했습니다.
@@ -55,9 +216,9 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 | Solar | 288 | 96 | 73 |
 | Electricity | 336 | 96 | 25 |
 
-### 2.4 데이터셋 및 버전별 하이퍼파라미터
+### 2.5 데이터셋 및 버전별 하이퍼파라미터
 
-#### 2.4.1 데이터셋별 backbone 학습 하이퍼파라미터
+#### 2.5.1 데이터셋별 backbone 학습 하이퍼파라미터
 
 | 데이터셋 | 샘플링 간격 | seq_len | pred_len | kernel_size | batch | 학습률 | 중앙학습 | 연합학습 | 공통 설정 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
@@ -65,21 +226,23 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 | Solar | 10분 | 288 | 96 | 73 | 256 | 0.001 | 15 epoch, patience 7 | local epoch 3, global round 15 | `individual=false`, `revin_affine=true`, `seed=0` |
 | Electricity | 1시간 | 336 | 96 | 25 | 256 | 0.001 | 15 epoch, patience 7 | local epoch 3, global round 15 | `individual=false`, `revin_affine=true`, `seed=0` |
 
-#### 2.4.2 V1~V2 기본 5개 베이스라인 하이퍼파라미터
+#### 2.5.2 V1~V2 기본 5개 베이스라인 하이퍼파라미터
 
 V1과 V2에서 사용한 5개 베이스라인은 데이터셋별 backbone 설정만 다르고, TTA와 loop 파라미터 구조는 동일했습니다.
 
-| 실험 타입 | 시작점 | 업데이트 대상 | k_ratio | alpha | lambda0 | gamma | TTA lr | grad clip | rollback | 추가 파라미터 |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| Centralized | 원시 데이터 | 없음 | - | - | - | - | 0.001 | - | - | epoch 15, patience 7 |
-| FedAvg | 원시 데이터 | 없음 | - | - | - | - | 0.001 | - | - | local epoch 3, global round 15 |
-| DLinear-TTA | 중앙학습 checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 centralized |
-| FED-TTA | FedAvg checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 federated |
-| FED-TTA Loop | FedAvg checkpoint | trend/season weight 직접 수정 + 서버 피드백 | 0.25 | 1.0 | 1.0 | 1.0 | 0.001 | 1.0 | threshold 3.0, window 20 | `delta_clip_norm=1.0`, `decay_factor=0.9` |
+| 실험 타입 | 시작점 | 업데이트 대상 | k_ratio | alpha | lambda0 | gamma | lambda_func | TTA lr | grad clip | rollback | 추가 파라미터 |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Centralized | 원시 데이터 | 없음 | - | - | - | - | - | 0.001 | - | - | epoch 15, patience 7 |
+| FedAvg | 원시 데이터 | 없음 | - | - | - | - | - | 0.001 | - | - | local epoch 3, global round 15 |
+| DLinear-TTA | 중앙학습 checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 centralized |
+| FED-TTA | FedAvg checkpoint | trend/season weight 직접 수정 | 0.25 | 1.0 | 1.0 | 1.0 | 0.0 | 0.001 | 1.0 | threshold 3.0, window 20 | backbone은 federated |
+| FED-TTA Loop | FedAvg checkpoint | trend/season weight 직접 수정 + 서버 피드백 | 0.25 | 1.0 | 1.0 | 1.0 | 0.0 | 0.001 | 1.0 | threshold 3.0, window 20 | `delta_clip_norm=1.0`, `decay_factor=0.9` |
 
-#### 2.4.3 V3 Murata direct-weight 안정화 하이퍼파라미터
+Legacy direct-weight 단계에서의 functional regularization 탐색은 주로 `lambda_func ∈ {0.5, 1.0, 2.0}`로 수행했고, Murata 일부 탐색에서는 `5.0`, `10.0`까지 확장했습니다.
 
-이 단계는 Murata 전용 실험이었습니다. 공통 설정은 `lr=1e-4`, `update_scope=norm`, `k_ratio=0.25`, `alpha=1.0`, `lambda0=1.0`, `gamma=1.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`, `ema_beta=1.0`입니다.
+#### 2.5.3 V3 Murata direct-weight 안정화 하이퍼파라미터
+
+이 단계는 Murata 전용 실험이었습니다. 공통 설정은 `lr=1e-4`, `update_scope=norm`, `k_ratio=0.25`, `alpha=1.0`, `lambda0=1.0`, `gamma=1.0`, `lambda_func=0.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`, `ema_beta=1.0`입니다.
 
 | 실험 버전 | hindcast_mask_threshold | min_active_frac | 목적 |
 | --- | ---: | ---: | --- |
@@ -88,9 +251,9 @@ V1과 V2에서 사용한 5개 베이스라인은 데이터셋별 backbone 설정
 | m3_skip_0p3 | 0.0 | 0.3 | inactive window 자체를 skip합니다. |
 | comb_m1m3_t0p1_f0p3 | 0.1 | 0.3 | masking과 skip을 동시에 적용합니다. |
 
-#### 2.4.4 V4~V6 Murata affine adapter 계열 하이퍼파라미터
+#### 2.5.4 V4~V6 Murata affine adapter 계열 하이퍼파라미터
 
-Affine 계열로 전환한 뒤에는 backbone을 동결하고 adapter만 업데이트했습니다. 공통 설정은 `lr=1e-4`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `sensitivity=1.0`, `max_boost=5.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`입니다.
+Affine 계열로 전환한 뒤에는 backbone을 동결하고 adapter만 업데이트했습니다. 공통 설정은 `lr=1e-4`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `lambda_func=0.0`, `sensitivity=1.0`, `max_boost=5.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`입니다.
 
 | 버전 | 실험 이름 | adapter_mode | k_ratio | reset_threshold | hard_gate_scale | acceptance_margin | 비고 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -115,9 +278,9 @@ Affine 계열로 전환한 뒤에는 backbone을 동결하고 adapter만 업데�
 | V6 | accept_0p25pct | time_affine | 0.0625 | 2.5 | 0.0 | 0.0025 | 0.25% 이상 개선 시만 수용합니다. |
 | V6 | accept_0p50pct | time_affine | 0.0625 | 2.5 | 0.0 | 0.005 | 0.50% 이상 개선 시만 수용합니다. |
 
-#### 2.4.5 Electricity, Solar 전이 점검용 affine 하이퍼파라미터
+#### 2.5.5 Electricity, Solar 전이 점검용 affine 하이퍼파라미터
 
-Murata에서 고른 time-affine 설계를 Electricity와 Solar에 그대로 이식해 비교했습니다. 공통 설정은 `adapter_mode=time_affine`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `lr=1e-4`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `reset_threshold=2.5`입니다.
+Murata에서 고른 time-affine 설계를 Electricity와 Solar에 그대로 이식해 비교했습니다. 공통 설정은 `adapter_mode=time_affine`, `alpha=0.3`, `beta=1.0`, `lambda_anchor=0.1`, `lambda0=1.0`, `gamma=1.0`, `lambda_func=0.0`, `lr=1e-4`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `reset_threshold=2.5`입니다.
 
 | 데이터셋 | 실험 버전 | k_ratio | 비고 |
 | --- | --- | ---: | --- |
