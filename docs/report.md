@@ -37,7 +37,7 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 1. 입력 시계열을 global scaling 후 모델에 넣고, RevIN으로 윈도우 단위 분포 이동을 흡수합니다.
 2. DLinear가 trend와 season 성분을 분리해 예측합니다.
 3. TTA는 최근 관측값 일부를 다시 맞추는 hindcast 손실을 사용합니다.
-4. 초기 버전은 backbone weight를 직접 수정했고, 후속 버전은 affine/time-wise adapter만 수정합니다.
+4. 버전에 따라 적응 대상이 달라집니다. V1·V2는 DLinear의 trend/season 선형 가중치를 직접 수정했습니다. V3는 DLinear 가중치를 고정하고 RevIN의 affine 파라미터(γ_RevIN, β_RevIN)만 업데이트하는 `norm-only` 방식으로 전환했습니다. V4 이후는 backbone 전체를 동결하고 독립적인 affine/time-wise adapter(γ, δ)만 업데이트합니다.
 5. rollback guard, hard gate, acceptance gate로 불안정한 업데이트를 건너뜁니다.
 6. loop 모드에서는 수용된 변화량만 서버에 반영하고, anchor와 optimizer state를 함께 갱신합니다.
 
@@ -84,6 +84,8 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 \]
 
 이 항은 backbone drift를 억제하기 위한 weight-space regularization입니다. 평균 이동은 trend 쪽 anchor 보존 강도를, 분산 이동은 season 쪽 anchor 보존 강도를 조절하도록 분리했습니다. 즉, 도메인 시프트가 약할 때는 anchor 보존을 강하게 유지하고, 시프트가 클 때는 적응 여지를 더 주는 설계입니다.
+
+단, \(\mathcal{L}_{reg}\)는 DLinear의 trend/season 가중치가 실제로 변경될 때만 의미를 갖습니다. V3에서 사용한 `update_scope=norm`은 DLinear 가중치를 고정하고 RevIN affine 파라미터만 업데이트하므로, \(W^{TTA}_{trend} = W^{anchor}_{trend}\)이고 \(W^{TTA}_{season} = W^{anchor}_{season}\)이 항상 성립합니다. 따라서 V3에서는 \(\mathcal{L}_{reg} = 0\)이고, `alpha`, `lambda0`, `gamma` 값은 Config에 명시돼 있더라도 실질 효과가 없습니다. V3의 유효 손실은 \(\mathcal{L}_{hind}\)만으로 구성됩니다.
 
 3. Functional regularization
 
@@ -148,6 +150,8 @@ FED-TTA Loop 계열에서는 로컬 적응으로 생긴 변화량을 서버에 �
 
 adapter가 항상 항등변환 근방에 머물도록 제한해, 장기적으로 불필요한 누적 drift가 생기는 것을 막았습니다. 이는 direct-weight TTA에서의 anchor 보존을 저차원 파라미터 공간으로 옮긴 형태라고 볼 수 있습니다.
 
+구현상 분모 \(C\)는 채널 수(마지막 차원)만을 사용합니다. `channel_affine`에서는 \(\gamma \in \mathbb{R}^{1\times1\times C}\)이므로 분자 합산 원소 수도 \(C\)여서 원소당 평균이 되지만, `time_affine`에서는 \(\gamma \in \mathbb{R}^{1\times H\times C}\)이므로 분자 합산 원소 수가 \(H\times C\)가 됩니다. 따라서 `time_affine` 모드에서 \(\mathcal{L}_{anchor}\)는 `channel_affine` 대비 \(H\)배(pred\_len=96이면 96배) 큰 스케일을 가집니다. 실험에서 `lambda_anchor=0.1`로 고정한 상태에서 두 adapter 모드 간 비교를 진행했으므로, 이 스케일 차이는 V4 scout 단계에서 channel-wise 대비 time-wise adapter의 `L_anchor` 기여분이 암묵적으로 더 강하게 작동했음을 의미합니다.
+
 4. Bounded adaptive weighting
 
 \[
@@ -172,9 +176,10 @@ boost = \min(1 + \rho \cdot \text{sg}(\mathcal{L}_{hind}),\; boost_{max})
 
 \[
 \mathcal{L}_{hind}^{pre} \ge \tau_{hard}\cdot \bar{\mathcal{L}}_{hind}
+\quad \text{and} \quad n_{finite} \ge \texttt{hard\_gate\_min\_history}
 \]
 
-를 만족하는 충분히 어려운 창에서만 적응을 수행합니다. 이는 쉬운 창에서의 불필요한 adaptation을 줄여 효율을 높이는 목적입니다.
+두 조건을 동시에 만족하는 충분히 어려운 창에서만 적응을 수행합니다. 첫 번째 조건은 쉬운 창에서의 불필요한 adaptation을 줄여 효율을 높이는 목적이며, 두 번째 조건은 warm-up 요건입니다. 이력이 `hard_gate_min_history`개 미만이면 rolling mean 추정이 불안정하므로 hard gate 판단 자체를 보류하고 해당 창의 적응을 건너뜁니다. V6 실험에서는 `hard_gate_min_history=20`을 사용했으므로, 초기 20개 창 동안은 hard gate 조건을 채우지 못해 적응이 항상 생략됩니다.
 
 3. Acceptance gate
 
@@ -242,7 +247,7 @@ Legacy direct-weight 단계에서의 functional regularization 탐색은 주로 
 
 #### 2.5.3 V3 Murata direct-weight 안정화 하이퍼파라미터
 
-이 단계는 Murata 전용 실험이었습니다. 공통 설정은 `lr=1e-4`, `update_scope=norm`, `k_ratio=0.25`, `alpha=1.0`, `lambda0=1.0`, `gamma=1.0`, `lambda_func=0.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`, `ema_beta=1.0`입니다.
+이 단계는 Murata 전용 실험이었습니다. 공통 설정은 `lr=1e-4`, `update_scope=norm`, `k_ratio=0.25`, `alpha=1.0`, `lambda0=1.0`, `gamma=1.0`, `lambda_func=0.0`, `grad_clip=1.0`, `rollback_threshold=3.0`, `rollback_window=20`, `drift_gate_threshold=0.0`, `ema_beta=1.0`입니다. `update_scope=norm`이므로 DLinear 가중치는 고정되어 `alpha`, `lambda0`, `gamma`는 실질 효과 없고, 유효 손실은 `L_hind`만입니다.
 
 | 실험 버전 | hindcast_mask_threshold | min_active_frac | 목적 |
 | --- | ---: | ---: | --- |
@@ -371,20 +376,27 @@ Murata에서 고른 time-affine 설계를 Electricity와 Solar에 그대로 이�
 
 ### 4.3 V3. Murata 안정화 제어 실험
 
-이 단계는 Murata를 대상으로 `직접 weight TTA를 완전히 버릴지, 아니면 제한적으로 살릴 수 있을지`를 확인하는 단계였습니다. 공통 backbone은 FedAvg이며, 학습률을 낮추고 update scope를 `norm`으로 제한했습니다.
+이 단계는 Murata를 대상으로 `직접 weight TTA를 완전히 버릴지, 아니면 제한적으로 살릴 수 있을지`를 확인하는 단계였습니다. 공통 backbone은 FedAvg이며, 학습률을 낮추고 update scope를 `norm`으로 제한했습니다. `update_scope=norm`은 DLinear의 trend/season 선형 가중치를 건드리지 않고 RevIN의 learnable affine 파라미터(γ_RevIN, β_RevIN)만 업데이트합니다. 따라서 이 단계의 실질 적응 대상은 윈도우 단위 분포 이동을 흡수하는 정규화 스케일뿐이며, DLinear 내부 동역학은 완전히 고정된 상태입니다.
+
+세 가지 안정화 메커니즘을 독립·조합하여 실험했습니다.
+
+- **Mechanism 1 (m1)**: hindcast 계산 시 near-zero(야간 휴지 구간) 스텝을 masking해 손실을 왜곡하는 비활성 스텝을 제외합니다 (`hindcast_mask_threshold`).
+- **Mechanism 2 (EMA anchor)**: EMA로 anchor를 천천히 이동시켜 장기 드리프트에 적응합니다 (`ema_beta`). 탐색 결과 Murata에서 유의미한 개선이 없어 이후 실험에서는 `ema_beta=1.0`(비활성)으로 고정했습니다.
+- **Mechanism 3 (m3)**: 비활성 구간 비율이 기준 이상이면 창 전체의 TTA를 skip합니다 (`min_active_frac`).
 
 | 방법 | 설계 포인트 | MSE | MAE | sMAPE |
 | --- | --- | ---: | ---: | ---: |
 | Fed backbone | 적응 없음 | 0.3032 | 0.3075 | 130.73 |
-| baseline_norm | norm-only update | 0.3038 | 0.3078 | 130.67 |
-| m1_mask_t0p1 | inactive hindcast masking | 0.3040 | 0.3080 | 130.66 |
-| m3_skip_0p3 | inactive window skip | 0.3039 | 0.3079 | 130.67 |
-| comb_m1m3_t0p1_f0p3 | masking + skip 결합 | 0.3042 | 0.3084 | 130.66 |
+| baseline_norm | norm-only update (m1·m2·m3 모두 비활성) | 0.3038 | 0.3078 | 130.67 |
+| m1_mask_t0p1 | m1: inactive hindcast masking (threshold=0.1) | 0.3040 | 0.3080 | 130.66 |
+| m3_skip_0p3 | m3: inactive window skip (min_frac=0.3) | 0.3039 | 0.3079 | 130.67 |
+| comb_m1m3_t0p1_f0p3 | m1+m3 결합 | 0.3042 | 0.3084 | 130.66 |
 
 #### 발견한 한계
 
 - catastrophic failure는 줄었지만, backbone을 의미 있게 넘지 못했습니다.
 - inactive 구간 제어는 안정성 관리에는 도움을 줬지만 정확도 개선은 거의 없었습니다.
+- EMA anchor(m2)는 Murata에서 유의미한 개선 효과가 없어 이후 단계에서는 사용하지 않았습니다.
 - direct weight update를 계속 밀어붙이기에는 효율 대비 이득이 작았습니다.
 
 #### 이후 변경
@@ -483,6 +495,7 @@ Murata에서 고른 time-affine 계열이 다른 데이터셋에도 통하는지
 1. direct weight TTA와 초기 FED-TTA Loop는 안정성이 부족했고, 그대로는 논문화하기 어렵습니다.
 2. backbone 동결 + time-affine adapter 전환은 catastrophic failure를 크게 줄였고, Murata에서는 backbone에 매우 근접한 수준까지 회복했습니다.
 3. hard gate와 selective activation은 정확도를 유지하면서 adaptation 빈도를 크게 낮출 수 있다는 점에서 실용적 가치가 있습니다.
+4. 3개 데이터셋 공통 drift-gate sweep에서 `gate_1p0`가 no-harm 조건을 만족하며 공통 threshold로 선택되었습니다.
 
 ### 5.2 아직 부족한 점
 
@@ -496,6 +509,67 @@ Murata에서 고른 time-affine 계열이 다른 데이터셋에도 통하는지
 - 현재 답: 바로 좋아지지 않았고, direct weight update는 불안정했습니다.
 - 핵심 전환: backbone 직접 수정에서 time-affine adapter로 전환했습니다.
 - 현재 최종 메시지: Murata에서는 backbone 성능을 거의 보존하면서 adaptation 빈도를 크게 줄이는 구조까지 확보했습니다. 다만 범용 정확도 향상 주장까지는 추가 근거가 더 필요합니다.
+- KCC 결론 메시지: 공통 drift-gate(`gate_1p0`)로 no-harm를 유지하면서 Murata/Solar에서 적응 빈도를 유의미하게 줄였습니다.
+
+## 5.4 KCC Drift-Gate Sweep (20260413)
+
+공통 실험 목적은 **평균 성능 개선이 아니라 no-harm + adaptation 비용 절감**을 검증하는 것입니다.
+
+선택 규칙:
+- 공통 threshold가 모든 데이터셋에서 상대 MSE 열화 `<= 0.5%`를 만족해야 합니다.
+- 그중 평균 adapt rate가 가장 낮은 threshold를 선택합니다.
+
+### 5.4.1 Threshold Sweep 요약
+
+| threshold | murata deg% | electricity deg% | solar deg% | avg adapt |
+| --- | ---: | ---: | ---: | ---: |
+| 0.3 | 0.021 | -0.097 | 0.003 | 0.846 |
+| 0.5 | 0.021 | -0.097 | 0.003 | 0.846 |
+| 1.0 | 0.015 | -0.096 | 0.000 | 0.605 |
+
+선택 결과: `gate_1p0`.
+
+### 5.4.2 Main Table (backbone vs control vs gate_1p0)
+
+| dataset | method | MSE | MAE | sMAPE |
+| --- | --- | ---: | ---: | ---: |
+| murata | backbone | 0.3032 | 0.3075 | 130.73 |
+| murata | control | 0.3032 | 0.3075 | 130.72 |
+| murata | gate_1p0 | 0.3032 | 0.3076 | 130.72 |
+| electricity | backbone | 0.1533 | 0.2467 | 12.56 |
+| electricity | control | 0.1532 | 0.2465 | 12.56 |
+| electricity | gate_1p0 | 0.1532 | 0.2465 | 12.56 |
+| solar | backbone | 0.2242 | 0.2567 | 146.00 |
+| solar | control | 0.2242 | 0.2566 | 146.02 |
+| solar | gate_1p0 | 0.2242 | 0.2567 | 146.02 |
+
+### 5.4.3 Efficiency Table (adaptation + skips)
+
+| dataset | control adapt | gated adapt | drift skip | rollback skip | param ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| murata | 0.778 | 0.410 | 0.555 | 0.034 | 0.518% |
+| electricity | 0.913 | 0.894 | 0.021 | 0.085 | 0.297% |
+| solar | 0.847 | 0.510 | 0.414 | 0.076 | 0.346% |
+
+### 5.4.4 Bootstrap CI (per-client, 2k resamples)
+
+| dataset | metric | mean diff | CI low | CI high | n_clients |
+| --- | --- | ---: | ---: | ---: | ---: |
+| murata | mse | 0.000047 | 0.000028 | 0.000067 | 30 |
+| murata | mae | 0.000033 | 0.000018 | 0.000054 | 30 |
+| murata | smape | -0.016228 | -0.020545 | -0.012728 | 30 |
+| murata | adapt_reduction | 0.472905 | 0.461344 | 0.481631 | 30 |
+| electricity | mse | -0.000148 | -0.000183 | -0.000113 | 321 |
+| electricity | mae | -0.000137 | -0.000158 | -0.000116 | 321 |
+| electricity | smape | -0.003277 | -0.004709 | -0.001898 | 321 |
+| electricity | adapt_reduction | 0.021220 | 0.008132 | 0.036421 | 321 |
+| solar | mse | 0.000000 | -0.000014 | 0.000014 | 137 |
+| solar | mae | 0.000003 | -0.000005 | 0.000010 | 137 |
+| solar | smape | 0.022414 | 0.021571 | 0.023249 | 137 |
+| solar | adapt_reduction | 0.397797 | 0.396956 | 0.398688 | 137 |
+
+관련 산출물:
+- `/home/jylee/DLinear-Season-Trend/docs/kcc_drift_gate_summary.md`
 
 ## 6. 비교에서 제외한 탐색
 
