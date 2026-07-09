@@ -82,7 +82,7 @@ elif checkpoint:
     cfg["checkpoint_path"] = checkpoint
 
 with open(dst, "w") as f:
-    yaml.safe_dump(cfg, f, sort_keys=False)
+    yaml.safe_dump(cfg, f)
 PY
 }
 
@@ -128,7 +128,7 @@ if batch:
     cfg["batch_size"] = int(batch)
 
 with open(dst, "w") as f:
-    yaml.safe_dump(cfg, f, sort_keys=False)
+    yaml.safe_dump(cfg, f)
 PY
 }
 

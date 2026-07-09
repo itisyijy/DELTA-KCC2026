@@ -1,0 +1,341 @@
+\documentclass[10pt,a4paper,twocolumn]{article}
+
+\usepackage{kotex}
+\usepackage[top=20mm,bottom=25mm,left=16mm,right=16mm]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=black
+}
+
+\captionsetup{font=small,labelsep=period,hypcap=false}
+\renewcommand{\tablename}{표}
+\renewcommand{\figurename}{그림}
+\renewcommand{\refname}{참고문헌}
+
+\setlist[itemize]{leftmargin=*,topsep=2pt,itemsep=1pt,parsep=0pt,partopsep=0pt}
+\setlist[enumerate]{leftmargin=*,topsep=2pt,itemsep=1pt,parsep=0pt,partopsep=0pt}
+
+\setlength{\columnsep}{8mm}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+\setlength{\emergencystretch}{6em}
+\setlength{\abovedisplayskip}{5pt plus 2pt minus 2pt}
+\setlength{\belowdisplayskip}{5pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\hfuzz=50pt
+\hbadness=10000
+\raggedbottom
+\pagestyle{empty}
+
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}{0.9\baselineskip}{0.4\baselineskip}{\normalfont\bfseries}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}{0.8\baselineskip}{0.3\baselineskip}{\normalfont\bfseries}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}{0.6\baselineskip}{0.2\baselineskip}{\normalfont\itshape}}
+\makeatother
+
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\second}[1]{\underline{#1}}
+
+\newcommand{\makekcctitle}{%
+\twocolumn[
+\begin{center}
+{\LARGE\bfseries FedGATE: 연합학습 시계열 예측에서 정확도를 유지하는 선택적 경량 온라인 보정\par}
+\vspace{0.7em}
+{\normalsize 이정윤$^{\dagger}$, 임정환$^{\dagger\dagger}$, 권혁윤$^{\dagger\dagger\dagger}$\par}
+\vspace{0.2em}
+{\small 서울과학기술대학교 산업공학과$^{\dagger}$\par}
+{\small 서울과학기술대학교 데이터사이언스학과$^{\dagger\dagger,\dagger\dagger\dagger}$\par}
+{\small jy020605@seoultech.ac.kr$^{\dagger}$, @seoultech.ac.kr$^{\dagger\dagger}$, hyukyoon.kwon@seoultech.ac.kr$^{\dagger\dagger\dagger}$\par}
+\vspace{0.55em}
+{\large\bfseries FedGATE: Selective Lightweight Online Calibration for Accurate Federated Time-series Forecasting\par}
+\vspace{0.3em}
+{\normalsize Jeong-Yun Lee$^{\dagger}$, Jeong-Hwan Lim$^{\dagger\dagger}$, Hyuk-Yoon Kwon$^{\dagger\dagger\dagger}$\par}
+\vspace{0.2em}
+{\small Department of Industrial Engineering, Seoul National University of Science and Technology$^{\dagger}$\par}
+{\small Department of Data Science, Seoul National University of Science and Technology$^{\dagger\dagger,\dagger\dagger\dagger}$\par}
+\vspace{0.55em}
+{\normalsize\bfseries 요 약\par}
+\vspace{0.35em}
+\begin{minipage}{0.97\textwidth}
+\small
+본 논문은 DLinear 기반 장기 시계열 예측에서 연합학습(Federated Learning, FL) 환경의 분포 이동에 대응하기 위한 FedGATE를 제안한다. FedGATE는 backbone을 동결한 채 저차원 time-affine adapter만 갱신하고, rollback guard, drift gate, acceptance gate, reset rule을 결합해 필요한 창에서만 선택적으로 적응한다. Murata, Electricity, Solar 데이터셋에서 공통 drift gate(threshold 1.0)를 적용한 결과, Murata와 Solar에서 적응 윈도우 비율을 각각 47.3\%, 39.8\% 줄이면서 MSE 열화를 0.02\% 이내로 유지하였고, Electricity에서는 MSE가 오히려 0.097\% 개선되었다(bootstrap 95\% CI 기준 통계적으로 유의). 이처럼 FedGATE는 backbone 정확도를 보존하면서 적응 빈도와 학습 가능 파라미터 비율(\(\le 0.6\%\))을 동시에 줄이는 안정적 경량 온라인 보정 구조를 제공한다.
+\end{minipage}
+\vspace{1.0em}
+\end{center}
+]
+}
+
+\begin{document}
+
+\makekcctitle
+
+\section{서론}
+
+장기 시계열 예측에서는 DLinear와 같은 효율적인 backbone이 강한 기준선으로 자리잡았지만, 훈련 시점과 배포 시점 사이의 분포 이동(distribution shift)은 여전히 빈번하게 발생한다~\cite{dlinear,nonstationary_transformer}. 예를 들어 스마트 팩토리 센서나 태양광 발전 패널처럼 기기마다 환경이 다른 연합학습(Federated Learning, FL) 시나리오에서는, 중앙 서버 재학습 없이 각 클라이언트가 테스트 시점의 국소 분포 변화에 스스로 대응해야 한다. 중앙집중형 학습은 강한 정적 모델을 제공하지만 테스트 시점의 클라이언트별 변화에 즉시 대응하기 어렵고, FL은 데이터 프라이버시와 분산 환경을 지원하지만 학습 이후 발생하는 클라이언트별 drift를 직접 보정하지는 못한다~\cite{fedavg}. 따라서 FL 환경에서는 backbone 성능을 해치지 않으면서 테스트 시점 변화에 제한적으로 대응하는 안정적 적응 기법이 필요하다~\cite{tent,stable_tta}.
+
+본 연구는 DLinear 기반 장기 시계열 예측에서 backbone을 동결한 채 time-affine adapter만 갱신하고, rollback guard, drift gate, acceptance gate, reset rule을 결합해 필요한 창에서만 적응하는 FedGATE를 제안한다~\cite{dlinear}.
+
+본 논문의 기여는 다음 세 가지로 정리할 수 있다.
+\begin{enumerate}
+  \item backbone을 동결한 채 time-affine adapter만 갱신하는 저차원 테스트 시 적응 구조를 제안한다.
+  \item Murata, Electricity, Solar에 공통으로 적용되는 drift gate 선택 규칙을 제안하고, 상대 MSE 열화 \(\le 0.5\%\)의 no-harm 기준으로 공통 threshold를 결정한다.
+  \item FedGATE가 강한 FedAvg backbone과 준동등 수준의 정확도를 유지하면서도 적응 빈도와 학습 가능 파라미터 비율을 줄일 수 있음을 보인다.
+\end{enumerate}
+
+\section{관련 연구}
+
+\subsection{시계열 예측과 비정상성}
+
+장기 시계열 예측에서는 복잡한 Transformer 계열 대신 선형 구조로도 높은 성능과 효율을 보인 DLinear가 강한 기준선으로 자리잡았다~\cite{dlinear}. 그러나 실제 시계열은 시간에 따라 통계적 특성이 변하는 비정상성을 띠며, 이러한 분포 이동은 학습된 글로벌 모델의 성능 저하로 이어진다~\cite{nonstationary_transformer}. RevIN과 같은 정규화 기법은 윈도우 단위 통계 변화를 완화하는 데 효과적이지만~\cite{revin}, 배포 후 새 환경에서 발생하는 클라이언트별 drift 자체를 해결하지는 못한다. FedGATE는 이 지점에서 backbone을 유지한 채 배포 시점의 국소 변화만 경량 보정하는 방식을 취한다.
+
+\subsection{테스트 시 적응과 안정성}
+
+분포 이동에 대응하기 위해 테스트 단계의 비라벨 데이터만으로 모델을 조정하는 test-time training(TTT) 및 test-time adaptation(TTA)이 활발히 연구되었다~\cite{ttt,tent}. 다만 동적 환경에서의 TTA는 모델 붕괴나 성능 열화 위험이 크고, 안정성 보완이 별도 과제로 남아 있다~\cite{stable_tta}. 최근에는 전체 가중치 대신 일부 파라미터만 조정해 메모리와 적응 비용을 줄이려는 경량 적응 방식도 제안되고 있다~\cite{ecotta}. FedGATE는 이러한 흐름을 시계열 FL 환경으로 가져와, backbone을 동결하고 선택 규칙을 통과한 창에서만 adapter를 갱신하는 보수적 TTA 구조를 취한다.
+
+\subsection{연합학습 환경의 이질성과 개인화}
+
+연합학습은 FedAvg를 시작으로 프라이버시 보존형 분산 학습의 대표 틀로 발전해 왔지만~\cite{fedavg}, 클라이언트 간 통계적 이질성은 여전히 핵심 난제이다. FedProx 계열 연구는 이러한 이질성이 단일 글로벌 모델의 일관된 일반화를 어렵게 한다는 점을 보여주었다~\cite{fedprox}. 따라서 배포 이후 각 클라이언트의 고유한 drift에 대응하는 개인화 또는 로컬 보정 기제가 필요하다. FedGATE는 서버 측 재학습보다 클라이언트 측 선택적 적응에 초점을 맞추며, no-harm 범위에서 적응 빈도와 비용을 함께 관리하는 경량 보정 구조를 지향한다.
+
+\section{제안 방법}
+
+\subsection{프레임워크 개요}
+
+본 연구에서 제안하는 FedGATE는 DLinear backbone~\cite{dlinear} 위에 자체 설계한 경량 로컬 adapter를 결합한 구조이다. 먼저 중앙학습 또는 FedAvg~\cite{fedavg}로 backbone을 학습한 뒤, 테스트 시점에는 각 클라이언트가 최근 관측 윈도우를 사용해 로컬 적응을 수행한다. 입력 시계열은 global scaling 후 모델에 주입되며, RevIN~\cite{revin}은 윈도우 단위 분포 이동을 완화한다. 본 연구의 최종 분석은 일반적인 test-time adaptation 문제의 연장선에 있으나~\cite{ttt,tent,stable_tta}, 서버 feedback loop나 backbone 전체 갱신이 아니라 필요한 창에만 제한적으로 적용되는 로컬 선택적 적응에 초점을 둔다.
+
+\subsection{동결 Backbone과 Time-Affine Adapter}
+
+본 연구에서는 안정성과 효율을 위해 backbone을 동결하고 예측 출력 위에 저차원 time-affine adapter를 부착한다~\cite{ecotta}.
+\begin{equation}
+\hat{Y}_{final} = \gamma \odot \hat{Y}_{backbone} + \delta,
+\end{equation}
+여기서 \(\hat{Y}_{backbone}, \hat{Y}_{final}\in\mathbb{R}^{B\times H\times C}\)이고, \(\gamma,\delta\in\mathbb{R}^{1\times H\times C}\)이다. 따라서 테스트 시점에는 backbone 전체가 아니라 \(\phi=(\gamma,\delta)\)만 갱신한다.
+
+adapter의 목적함수는 다음과 같다.
+\begin{equation}
+\mathcal{L}_{affine}
+= \alpha_{eff}\mathcal{L}_{cons}
++ \beta_{eff}\mathcal{L}_{hind}
++ \lambda_{anchor}\mathcal{L}_{anchor}.
+\end{equation}
+여기서 \(\mathcal{L}_{hind}\)는 최근 관측 구간에 대한 복원 오차, \(\mathcal{L}_{cons}\)는 인접 윈도우 사이의 시간적 일관성 오차, \(\mathcal{L}_{anchor}\)는 adapter가 항등변환 근처에 머물도록 하는 정규화 항이다.
+\begin{equation}
+\mathcal{L}_{hind}
+= \frac{1}{BkC}\left\|\hat{Y}^{curr}_{1:k} - X^{recent}_{1:k}\right\|_2^2,
+\end{equation}
+\begin{equation}
+\mathcal{L}_{cons}
+= \frac{1}{B(H-1)C}\left\|\hat{Y}^{curr}_{1:H-1} - \mathrm{sg}\left(\hat{Y}^{prev}_{2:H}\right)\right\|_2^2,
+\end{equation}
+\begin{equation}
+\mathcal{L}_{anchor}
+= \frac{\|\gamma-1\|_2^2+\|\delta\|_2^2}{C}.
+\end{equation}
+여기서 \(1\!:\!k\)와 \(2\!:\!H\)는 horizon index를, \(\mathrm{sg}(\cdot)\)는 stop-gradient를 뜻한다. 또한 hindcast 오차에 따라 \(boost\)를 계산하고 \(\alpha\)와 \(\beta\)를 재조정한다.
+\begin{equation}
+boost = \min(1 + \rho \cdot \mathrm{sg}(\mathcal{L}_{hind}),\; boost_{max}),
+\end{equation}
+\begin{equation}
+\alpha_{eff} = \frac{\alpha}{boost}, \qquad
+\beta_{eff} = \beta \cdot boost.
+\end{equation}
+
+\subsection{선택적 적응 규칙}
+
+FedGATE는 모든 테스트 창에서 adapter를 갱신하지 않고, 사전 정의한 규칙을 만족할 때만 적응을 수행한다. 먼저 drift gate는 사전 drift score가 임계값 이상인 창에서만 적응을 시도한다. rollback guard는 현재 창의 사전 hindcast 오차가 과거 rolling mean에 비해 과도하게 크면 업데이트를 생략한다. 적응 후에는 acceptance gate를 적용해
+\begin{equation}
+\mathcal{L}_{hind}^{post} \le (1-m)\mathcal{L}_{hind}^{pre}
+\end{equation}
+를 만족하는 경우에만 갱신을 수용한다. 마지막으로 업데이트 이후 hindcast 손실이 \texttt{reset\_threshold}를 넘으면 adapter를 항등변환으로 초기화한다.
+
+\section{실험}
+
+\subsection{실험 설정}
+
+평가 지표는 MSE, MAE, sMAPE를 사용하였으며, 표의 수치는 모두 클라이언트 평균이다. MSE와 MAE는 RevIN 역정규화 직후의 global scale 공간에서 계산하고, sMAPE는 global scaler까지 완전히 역정규화한 원 단위에서 \(0\)--\(200\%\) convention으로 계산한다. 공통 설정은 batch size 256, centralized training 15 epochs(patience 7), FedAvg local epoch 3과 global round 15이며, 나머지 구현 설정은 모든 데이터셋에서 동일하게 고정하였다.
+
+\begin{table}[t]
+  \centering
+  \caption{데이터셋 및 backbone 설정}
+  \label{tab:dataset-config}
+  \small
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{lcccc}
+    \toprule
+    데이터셋 & 간격 & 입력 길이 & 예측 길이 & 커널 크기 \\
+    \midrule
+    Murata & 15 min & 192 & 96 & 49 \\
+    Solar & 10 min & 288 & 96 & 73 \\
+    Electricity & 1 hour & 336 & 96 & 25 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{비교군과 평가 프로토콜}
+
+대표 비교를 위해 Centralized, FedAvg backbone, 그리고 두 개의 내부 비교군인 direct-weight TTA와 loop-based baseline을 함께 보고하되, 본문의 주 비교는 FedAvg backbone, 항상 적응하는 Control, 그리고 공통 drift gate를 적용한 FedGATE 사이에서 수행한다. 여기서 direct-weight TTA는 DLinear backbone의 trend/season 가중치를 hindcast 손실로 직접 갱신하는 legacy baseline이며, loop-based baseline은 여기에 서버 feedback을 추가한 내부 확장형 baseline이다. 두 비교군은 TENT나 EcoTTA의 재현이 아니라 본 연구의 초기 설계 대안을 정리한 내부 구현이다. Control은 최종 time-affine adapter에서 drift gate를 비활성화한 기준선이며, 이후 drift gate threshold를 \(\{0.3, 0.5, 1.0\}\)에서 탐색하여 세 데이터셋에 동일하게 적용하였다. 공통 threshold는 모든 데이터셋에서 backbone 대비 상대 MSE 열화가 \(\le 0.5\%\)인 후보 중 평균 적응 비율이 가장 낮은 값으로 선택하였다.
+
+\subsection{기초 비교 결과}
+
+표~\ref{tab:main-baselines}는 대표 비교군 결과를 요약한다. 내부 비교군인 direct-weight TTA와 loop-based baseline은 세 데이터셋에서 backbone을 일관되게 넘지 못하였다. 반면 동결 backbone 기반 time-affine은 치명적 성능 저하를 줄이면서 backbone과 준동등 수준의 정확도를 유지하였다. 따라서 이후 평가는 동결 backbone 기반의 선택적 적응에 초점을 두었다.
+
+\begin{table}[t]
+  \centering
+  \caption{대표 비교군 결과}
+  \label{tab:main-baselines}
+  \scriptsize
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{llccc}
+    \toprule
+    데이터셋 & 방식 & MSE & MAE & sMAPE \\
+    \midrule
+    Murata & Centralized & \second{0.3064} & \second{0.3151} & 131.02 \\
+    Murata & FedAvg bb & \best{0.3032} & \best{0.3075} & \second{130.73} \\
+    Murata & Direct TTA & 0.3188 & 0.3315 & 130.84 \\
+    Murata & Loop baseline & 0.4068 & 0.3872 & 133.70 \\
+    Murata & Time-affine & \best{0.3032} & \best{0.3075} & \best{130.72} \\
+    \midrule
+    Electricity & Centralized & \best{0.1464} & \best{0.2434} & 12.57 \\
+    Electricity & FedAvg bb & 0.1533 & 0.2467 & 12.56 \\
+    Electricity & Direct TTA & 0.2536 & 0.3116 & 15.33 \\
+    Electricity & Loop baseline & 0.1691 & 0.2731 & 14.11 \\
+    Electricity & Time-affine & \second{0.1530} & \second{0.2464} & \best{12.55} \\
+    \midrule
+    Solar & Centralized & \best{0.2232} & \best{0.2561} & \second{146.01} \\
+    Solar & FedAvg bb & \second{0.2242} & 0.2567 & \best{146.00} \\
+    Solar & Direct TTA & 0.2268 & 0.2597 & 146.12 \\
+    Solar & Loop baseline & 0.3268 & 0.3424 & 148.74 \\
+    Solar & Time-affine & \second{0.2242} & \second{0.2566} & 146.02 \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{공통 Gate 결과}
+
+표~\ref{tab:threshold-sweep}은 time-affine Control을 기준으로 drift gate threshold를 탐색한 결과이다. \(\Delta\)MSE(\%)는 \(100\cdot(\text{gated} - \text{backbone})/\text{backbone}\)으로 정의하며, 음수는 backbone 대비 개선을 의미한다.
+
+\begin{table}[t]
+  \centering
+  \caption{공통 drift gate threshold 탐색 결과}
+  \label{tab:threshold-sweep}
+  \small
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{ccccc}
+    \toprule
+    임계값 & Murata \(\Delta\)MSE(\%) & Elec. \(\Delta\)MSE(\%) & Solar \(\Delta\)MSE(\%) & 평균 적응 비율 \\
+    \midrule
+    0.3 & \second{0.021} & \best{-0.097} & \second{0.003} & \second{0.846} \\
+    0.5 & \second{0.021} & \best{-0.097} & \second{0.003} & \second{0.846} \\
+    1.0 & \best{0.015} & \second{-0.096} & \best{0.000} & \best{0.605} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+세 후보 모두 no-harm 기준을 만족했으며, threshold 1.0이 평균 적응 비율을 가장 낮추어 공통 drift gate로 선택되었다.
+
+표~\ref{tab:kcc-main}은 backbone, Control, 공통 drift gate의 최종 정확도 비교를 보여준다. 공통 drift gate는 세 데이터셋 모두에서 backbone과 준동등 수준의 정확도를 유지했으며, 상대 MSE 열화도 사전 정의한 \(\le 0.5\%\) 범위 안에 머물렀다. 클라이언트 단위 bootstrap 신뢰구간은 부록 표~\ref{tab:bootstrap-ci}에 제시하였다.
+
+\begin{table}[t]
+  \centering
+  \caption{Backbone, Control, 공통 drift gate 정확도 비교}
+  \label{tab:kcc-main}
+  \scriptsize
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{llccc}
+    \toprule
+    데이터셋 & 방식 & MSE & MAE & sMAPE \\
+    \midrule
+    Murata & Backbone & \best{0.3032} & \best{0.3075} & \second{130.73} \\
+    Murata & Control & \best{0.3032} & \best{0.3075} & \best{130.72} \\
+    Murata & Shared gate & \best{0.3032} & \second{0.3076} & \best{130.72} \\
+    \midrule
+    Electricity & Backbone & \second{0.1533} & \second{0.2467} & \best{12.56} \\
+    Electricity & Control & \best{0.1532} & \best{0.2465} & \best{12.56} \\
+    Electricity & Shared gate & \best{0.1532} & \best{0.2465} & \best{12.56} \\
+    \midrule
+    Solar & Backbone & \best{0.2242} & \second{0.2567} & \best{146.00} \\
+    Solar & Control & \best{0.2242} & \best{0.2566} & \second{146.02} \\
+    Solar & Shared gate & \best{0.2242} & \second{0.2567} & \second{146.02} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{적응 효율}
+
+표~\ref{tab:kcc-efficiency}는 공통 drift gate 적용 시 적응과 생략 비율의 변화를 정리한 것이다. Murata와 Solar에서는 적응 비율 감소가 크게 나타났고, Electricity에서는 감소폭이 작았다. 학습 가능 파라미터 비율은 세 데이터셋 모두에서 \(0.6\%\) 미만이었다.
+
+\begin{table}[t]
+  \centering
+  \caption{공통 gate 적용 시 적응 효율 비교}
+  \label{tab:kcc-efficiency}
+  \scriptsize
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{lccccc}
+    \toprule
+    데이터셋 & 기준선 적응 & 게이트 적응 & 드리프트 생략 & 롤백 생략 & 파라미터 비율 \\
+    \midrule
+    Murata & 0.778 & 0.410 & 0.555 & 0.034 & 0.518\% \\
+    Electricity & 0.913 & 0.894 & 0.021 & 0.085 & 0.297\% \\
+    Solar & 0.847 & 0.510 & 0.414 & 0.076 & 0.346\% \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\section{결론 및 향후 연구}
+
+본 연구는 FL 기반 장기 시계열 예측에서 backbone을 동결한 time-affine adapter와 선택적 drift gate를 결합한 FedGATE를 제안하였다. 실험 결과 FedGATE는 Murata와 Solar에서 적응 윈도우 비율을 각각 47.3\%, 39.8\% 줄이면서 MSE 열화를 0.02\% 이내로 유지하였고, Electricity에서는 MSE가 통계적으로 유의하게 개선되었다. 이는 엣지 디바이스처럼 연산 예산이 제한된 FL 환경에서, 서버 재학습 없이 클라이언트 측 보정만으로 달성한 실질적 이점이다.
+
+실험 결과는 FL 시계열 환경에서 적응 자유도와 안정성 사이의 상충 관계를 보여준다. full-weight TTA는 높은 자유도를 제공하지만 불안정성이 크고, frozen backbone 위의 저차원 adapter는 안정적으로 동작하면서 Murata와 Solar에서 적응 빈도를 절반 가까이 줄이는 실질적 효율 이점을 제공하였다. Electricity에서는 drift gate의 효과가 제한적이었으나(적응 감소 2.1\%), MSE 자체가 소폭 개선되어 선택적 보정의 유효성을 확인하였다.
+
+본 연구의 한계도 존재한다. 결과가 단일 시드에 한정되어 있어 통계적 분산 평가가 부족하며, 효율성 검증도 적응 비율과 파라미터 비율 중심이어서 실측 시간이나 FLOPs 수준의 추가 분석이 남아 있다. 향후에는 다중 시드 검증과 실측 시간/FLOPs 기반 효율 지표, 데이터셋별 drift 특성 분석 및 최근 test-time training 계열 방법과 다양한 장기 시계열 backbone과의 직접 비교를 통해 결과를 더욱 강화하고자 한다.
+
+{\footnotesize
+\bibliographystyle{ieeetr}
+\bibliography{references}
+}
+
+\clearpage
+\onecolumn
+\appendix
+
+\section{공통 Drift Gate의 Bootstrap 신뢰구간}
+
+표~\ref{tab:bootstrap-ci}는 공통 drift gate와 backbone의 클라이언트 단위 차이에 대해 2,000회 bootstrap resampling을 수행한 결과이다. 정확도는 MSE 기준으로, 효율은 adaptation reduction 기준으로 요약하였다.
+
+\begin{center}
+\captionof{table}{공통 drift gate와 backbone의 bootstrap 신뢰구간}
+\label{tab:bootstrap-ci}
+\scriptsize
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrr}
+  \toprule
+  데이터셋 & 지표 & 평균 차이 & 신뢰구간 하한 & 신뢰구간 상한 & 클라이언트 수 \\
+  \midrule
+  Murata & mse & 0.000047 & 0.000028 & 0.000067 & 30 \\
+  Murata & adapt\_reduction & 0.472905 & 0.461344 & 0.481631 & 30 \\
+  Electricity & mse & -0.000148 & -0.000183 & -0.000113 & 321 \\
+  Electricity & adapt\_reduction & 0.021220 & 0.008132 & 0.036421 & 321 \\
+  Solar & mse & 0.000000 & -0.000014 & 0.000014 & 137 \\
+  Solar & adapt\_reduction & 0.397797 & 0.396956 & 0.398688 & 137 \\
+  \bottomrule
+\end{tabular}%
+}
+\end{center}
+
+\end{document}
