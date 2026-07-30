@@ -1,157 +1,156 @@
+# DELTA-KCC2026
+
+DELTA는 장기 시계열 예측 모델의 배포 후 분포 이동에 대응하는 선택적 경량
+Test-Time Adaptation(TTA) 프레임워크입니다. DLinear backbone은 동결하고
+time-affine adapter만 갱신하며, drift gate·rollback guard·reset rule로 불필요하거나
+해로운 적응을 억제합니다.
+
+이 저장소는 KCC 2026 연구를 위한 학습·평가 코드, 재현 스크립트, 리포트 생성기와
+원고 산출물을 포함합니다.
+
+## 핵심 구성
+
+```text
+scripts/
+├── run.py                       # 공통 학습/TTA 진입점
+├── models/                      # DLinear, RevIN-DLinear
+├── data/                        # CSV 및 kcc2026 parquet 로더
+├── trainers/                    # Centralized, FedAvg
+├── tta/                         # adapter, loss, engine, loop
+├── run_dataset_pipeline.sh      # 데이터셋별 5-baseline 파이프라인
+├── run_kcc_drift_gate_sweep.sh  # drift-gate threshold sweep
+└── report_kcc_*.py              # 효율성, CI, multi-seed 리포트
+
+configs/
+├── murata/
+├── solar/
+└── electricity/
+
+docs/
+├── KCC_장기시계열TTA_jhlim_v6.docx
+├── v7_추가원고.md
+└── report.md
 ```
-scripts/                         configs/
-├── __init__.py                  ├── electricity/{centralized,fed,dlinear_tta,fed_tta,fed_tta_loop}.yaml
-├── config.py                    ├── solar/         (동일 5개)
-├── run.py                       └── murata/        (경로 placeholder, 동일 5개)
-├── models/
-│   ├── dlinear.py               (backgrounds/LTSF-Linear 어댑트)
-│   └── revin_dlinear.py         (RevIN wrapper — NEW)
-├── data/
-│   ├── dataset.py               (ClientData, ClientDataset, CentralizedDataset)
-│   └── loader.py                (CSV / kcc2026 parquet 양쪽 지원)
-├── trainers/
-│   ├── centralized.py           (Baseline 1)
-│   └── fedavg.py                (Baseline 2)
-├── tta/
-│   ├── loss.py                  (HindcastLoss, DynamicRegularizer, TTALoss)
-│   ├── adapter.py               (RevIN freeze + anchor 추출)
-│   ├── engine.py                (run_tta_step, RollbackGuard)
-│   └── loop.py                  (FED-TTA Loop — Baseline 5)
-└── utils/
-    ├── metrics.py               (MSE/MAE/sMAPE/Wasserstein)
-    └── tools.py                 (EarlyStopping, seed_everything)
+
+각 데이터셋 config는 다음 다섯 baseline을 공유합니다.
+
+1. `centralized`: 중앙집중 DLinear 학습
+2. `fed`: FedAvg DLinear 학습
+3. `dlinear_tta`: 중앙집중 모델 + TTA
+4. `fed_tta`: FedAvg 모델 + 일회성 TTA
+5. `fed_tta_loop`: FedAvg 모델 + 반복 서버 피드백 TTA
+
+## 데이터셋 설정
+
+| 데이터셋 | 입력 길이 | 예측 길이 | 커널 크기 | 시간 범위 |
+| --- | ---: | ---: | ---: | --- |
+| Murata | 192 | 96 | 49 | 48h → 24h |
+| Solar | 288 | 96 | 73 | 48h → 16h |
+| Electricity | 336 | 96 | 25 | 14d → 4d |
+| Traffic | 336 | 96 | 25 | 14d → 4d |
+
+Murata·Solar·Electricity 재현 config는 저장소에 포함됩니다. Traffic은 862개
+센서 확장성 평가에 사용하며, 데이터 경로가 환경에 의존하므로
+`configs/traffic/`을 로컬 config로 관리합니다.
+
+TTA baseline은 동일한 `seq_len`/`pred_len`로 학습된 선행 체크포인트가 필요합니다.
+`--auto-prereq`는 체크포인트와 `best.pt.meta.json`을 검사하고, 누락되었거나 config와
+맞지 않으면 prerequisite baseline을 먼저 학습합니다.
+
+## 실행 환경
+
+```bash
+cd /home/jylee/DELTA-KCC2026
+export PYTHON=/home/jylee/miniconda3/envs/kcc2026/bin/python3
+export DEVICE=cuda:1
 ```
 
-# 실행 방법 (kcc2026 conda env 사용)
+모든 GPU 실험은 `cuda:1`에서 실행합니다. 장시간 작업은 tmux detached session으로
+실행하고, 시작 전에 RAM과 VRAM 여유를 확인합니다.
 
-``` BASH
-PYTHON=/home/jylee/miniconda3/envs/kcc2026/bin/python
-cd /home/jylee/DLinear-Season-Trend
-```
-
-현재 기본 config는 모두 `cuda:1`을 사용합니다.
-
-- `batch_size: 256`
-- `epochs: 15` for centralized
-- `global_rounds: 15` for federated baselines
-- dataset-specific `seq_len`
-- dataset-specific `kernel_size`
-- `solar`: `288 -> 96` (`48h -> 16h`)
-- `solar kernel_size`: `73`
-- `murata`: `192 -> 96` (`48h -> 24h`)
-- `murata kernel_size`: `49`
-- `electricity`: `336 -> 96` (`14d -> 4d`)
-- `electricity kernel_size`: `25`
-
-`dlinear_tta`, `fed_tta`, `fed_tta_loop`는 현재 config와 동일한 `seq_len/pred_len`로 다시 학습한 체크포인트를 사용해야 합니다. 예전 `96 -> 96` 체크포인트는 그대로 재사용할 수 없습니다.
-
-`--auto-prereq`를 사용하면 TTA 계열 baseline 실행 시 필요한 선행 체크포인트를 자동으로 검증합니다. 체크포인트가 없거나, sidecar metadata(`best.pt.meta.json`) 기준으로 현재 prerequisite config와 맞지 않으면 해당 prerequisite baseline을 먼저 다시 학습한 뒤 이어서 실행합니다.
-
-## 현재 상태 메모
-
-`fed_tta_loop` 발산 버그 수정 완료 (2026-04-11, `scripts/tta/loop.py`).
-
-- **원인**: 서버 피드백 후 anchor가 갱신되지 않아 delta = `W_current - W_original` (누적 drift 전체)이 됐고, 매 스텝마다 이미 반영된 drift를 0.9배로 재적용하는 양의 피드백 루프로 MSE가 (1.9)ⁿ 급수로 발산.
-- **수정**: broadcast 시 `client_anchors`를 새 global weights로 갱신 + `optimizer.state.clear()`로 stale Adam 모멘텀 초기화.
-
-모든 실행 예시는 기본적으로 `tmux` detached session 기준입니다.
-
-``` BASH
+```bash
+free -h
+nvidia-smi
 tmux ls
-tmux attach -t <session_name>
-tmux kill-session -t <session_name>
 ```
 
-## Baseline 1: Centralized 학습
-``` BASH
-# solar
-tmux new-session -d -s solar_centralized \
-    "$PYTHON -m scripts.run --config configs/solar/centralized.yaml"
+## 빠른 실행
 
-# electricity
-tmux new-session -d -s electricity_centralized \
-    "$PYTHON -m scripts.run --config configs/electricity/centralized.yaml"
+아래 예시는 Murata 기준이며 `DATASET`만 `solar` 또는 `electricity`로 바꿀 수
+있습니다.
 
-# murata
-tmux new-session -d -s murata_centralized \
-    "$PYTHON -m scripts.run --config configs/murata/centralized.yaml"
+```bash
+DATASET=murata
+
+# Centralized
+tmux new-session -d -s "${DATASET}_centralized" \
+  "$PYTHON -m scripts.run --config configs/$DATASET/centralized.yaml --device $DEVICE"
+
+# FedAvg
+tmux new-session -d -s "${DATASET}_fed" \
+  "$PYTHON -m scripts.run --config configs/$DATASET/fed.yaml --device $DEVICE"
+
+# Centralized + TTA
+tmux new-session -d -s "${DATASET}_dlinear_tta" \
+  "$PYTHON -m scripts.run --config configs/$DATASET/dlinear_tta.yaml --device $DEVICE --auto-prereq"
+
+# FedAvg + TTA
+tmux new-session -d -s "${DATASET}_fed_tta" \
+  "$PYTHON -m scripts.run --config configs/$DATASET/fed_tta.yaml --device $DEVICE --auto-prereq"
+
+# FedAvg + loop TTA
+tmux new-session -d -s "${DATASET}_fed_tta_loop" \
+  "$PYTHON -m scripts.run --config configs/$DATASET/fed_tta_loop.yaml --device $DEVICE --auto-prereq"
 ```
 
-## Baseline 2: FedAvg 학습
-``` BASH
-# solar
-tmux new-session -d -s solar_fed \
-    "$PYTHON -m scripts.run --config configs/solar/fed.yaml"
+실행 상태와 로그는 다음처럼 확인합니다.
 
-# electricity
-tmux new-session -d -s electricity_fed \
-    "$PYTHON -m scripts.run --config configs/electricity/fed.yaml"
-
-# murata
-tmux new-session -d -s murata_fed \
-    "$PYTHON -m scripts.run --config configs/murata/fed.yaml"
+```bash
+tmux attach -t murata_fed_tta
+tail -f logs/<run-log>.log
 ```
 
-## Baseline 3: Centralized 모델 + TTA
-``` BASH
-# solar
-tmux new-session -d -s solar_dlinear_tta \
-    "$PYTHON -m scripts.run --config configs/solar/dlinear_tta.yaml --checkpoint-path checkpoints/solar_centralized/best.pt"
+## Drift-gate 실험과 리포트
 
-# electricity
-tmux new-session -d -s electricity_dlinear_tta \
-    "$PYTHON -m scripts.run --config configs/electricity/dlinear_tta.yaml --checkpoint-path checkpoints/electricity_centralized/best.pt"
+효율성 pilot → 전체 데이터셋 확장 → multi-seed 검증은 백그라운드 자동화
+스크립트로 실행합니다.
 
-# murata
-tmux new-session -d -s murata_dlinear_tta \
-    "$PYTHON -m scripts.run --config configs/murata/dlinear_tta.yaml --checkpoint-path checkpoints/murata_centralized/best.pt"
+```bash
+STAMP=$(date +%Y%m%d_%H%M%S)
+STAMP=$STAMP DEVICE=cuda:1 sh scripts/run_kcc_rebuttal_overnight.sh
 ```
 
-``` BASH
-# checkpoint가 없거나 mismatch면 centralized를 먼저 다시 학습
-tmux new-session -d -s murata_dlinear_tta_auto \
-    "$PYTHON -m scripts.run --config configs/murata/dlinear_tta.yaml --auto-prereq"
+기존 결과를 재사용해 threshold sweep만 실행할 수도 있습니다.
+
+```bash
+STAMP=<experiment-stamp> REUSE_EXISTING=1 DATASETS="murata electricity solar" \
+  DEVICE=cuda:1 sh scripts/run_kcc_drift_gate_sweep.sh
 ```
 
-## Baseline 4: FL 모델 + 일회성 TTA
-``` BASH
-# solar
-tmux new-session -d -s solar_fed_tta \
-    "$PYTHON -m scripts.run --config configs/solar/fed_tta.yaml --checkpoint-path checkpoints/solar_fed/best.pt"
+리포트 생성기는 쉼표로 구분한 데이터셋 목록을 받습니다. Traffic 결과 source가
+준비된 경우 동일한 공통 threshold 분석에 포함할 수 있습니다.
 
-# electricity
-tmux new-session -d -s electricity_fed_tta \
-    "$PYTHON -m scripts.run --config configs/electricity/fed_tta.yaml --checkpoint-path checkpoints/electricity_fed/best.pt"
+```bash
+$PYTHON scripts/report_kcc_drift_gate_sweep.py \
+  --stamp <experiment-stamp> \
+  --datasets murata,electricity,solar,traffic
 
-# murata
-tmux new-session -d -s murata_fed_tta \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
+$PYTHON scripts/report_kcc_drift_gate_ci.py \
+  --stamp <experiment-stamp> \
+  --datasets murata,electricity,solar,traffic
 ```
 
-``` BASH
-# checkpoint가 없거나 mismatch면 fed를 먼저 다시 학습
-tmux new-session -d -s murata_fed_tta_auto \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta.yaml --auto-prereq"
+실험 결과는 `runs/`, 체크포인트는 `checkpoints/`, 로그는 `logs/` 아래에 생성되며
+Git에는 포함하지 않습니다.
+
+## 검증
+
+```bash
+$PYTHON -m pytest -q
+sh -n scripts/run_kcc_drift_gate_sweep.sh
+$PYTHON -m py_compile scripts/report_kcc_drift_gate_sweep.py
 ```
 
-## Baseline 5: FED-TTA Loop
-
-``` BASH
-# solar
-tmux new-session -d -s solar_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/solar/fed_tta_loop.yaml --checkpoint-path checkpoints/solar_fed/best.pt"
-
-# electricity
-tmux new-session -d -s electricity_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/electricity/fed_tta_loop.yaml --checkpoint-path checkpoints/electricity_fed/best.pt"
-
-# murata
-tmux new-session -d -s murata_fed_tta_loop \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml --checkpoint-path checkpoints/murata_fed/best.pt"
-```
-
-``` BASH
-# checkpoint가 없거나 mismatch면 fed를 먼저 다시 학습
-tmux new-session -d -s murata_fed_tta_loop_auto \
-    "$PYTHON -m scripts.run --config configs/murata/fed_tta_loop.yaml --auto-prereq"
-```
+연구 주장과 표 병합용 최신 초안은
+[`docs/v7_추가원고.md`](docs/v7_추가원고.md), 상세 구현·실험 기록은
+[`docs/report.md`](docs/report.md)에서 확인할 수 있습니다.
