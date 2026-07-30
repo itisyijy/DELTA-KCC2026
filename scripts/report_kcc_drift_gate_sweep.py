@@ -11,9 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.models.revin_dlinear import RevINDLinear
 from scripts.tta.adapter import AffineAdapter
 
-ROOT = Path("/home/jylee/DLinear-Season-Trend")
+ROOT = Path("/home/jylee/DELTA-KCC2026")
 RUN_ROOT = ROOT / "runs" / "kcc_drift_gate_sweep"
 DATASETS = ("murata", "electricity", "solar")
+# High-variate CSV datasets where a degenerate adapt-rate (~0 or ~1) invalidates the gate.
+HIGH_VARIATE = {"electricity", "solar", "traffic"}
 GATES = (("gate_0p3", 0.3), ("gate_0p5", 0.5), ("gate_1p0", 1.0))
 
 
@@ -58,19 +60,19 @@ def gate_eval(backbone: float, control: float, gated: float, control_adapt: floa
     return rel_deg, adapt_drop
 
 
-def choose_threshold(rows: dict[str, dict[str, dict]]) -> tuple[str | None, str]:
+def choose_threshold(rows: dict[str, dict[str, dict]], datasets: tuple[str, ...]) -> tuple[str | None, str]:
     candidates = []
     for kind, thr in GATES:
         valid = True
         mean_adapt = 0.0
-        for dataset in DATASETS:
+        for dataset in datasets:
             gated = rows[dataset][kind]
-            if dataset in {"electricity", "solar"} and (gated["adapt_rate"] <= 0.01 or gated["adapt_rate"] >= 0.99):
+            if dataset in HIGH_VARIATE and (gated["adapt_rate"] <= 0.01 or gated["adapt_rate"] >= 0.99):
                 valid = False
             if gated["rel_deg"] > 0.5:
                 valid = False
             mean_adapt += gated["adapt_rate"]
-        candidates.append((kind, thr, valid, mean_adapt / len(DATASETS)))
+        candidates.append((kind, thr, valid, mean_adapt / len(datasets)))
     valid_rows = [row for row in candidates if row[2]]
     if not valid_rows:
         return None, "Murata-only primary: no shared drift threshold satisfied no-harm and selectivity."
@@ -83,8 +85,8 @@ def write_csv(path: Path, rows: list[list[str]]) -> None:
         csv.writer(f).writerows(rows)
 
 
-def write_svg(path: Path, selected: str, rows: dict[str, dict[str, dict]]) -> None:
-    labels = list(DATASETS)
+def write_svg(path: Path, selected: str, rows: dict[str, dict[str, dict]], datasets: tuple[str, ...]) -> None:
+    labels = list(datasets)
     vals = [(rows[d]["control"]["adapt_rate"], rows[d][selected]["adapt_rate"]) for d in labels]
     bars, width = [], 420
     for i, (ctrl, gate) in enumerate(vals):
@@ -118,13 +120,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize KCC drift-gate sweep")
     parser.add_argument("--run-root", default=str(RUN_ROOT))
     parser.add_argument("--stamp", default=None)
+    parser.add_argument("--datasets", default=",".join(DATASETS), help="Comma-separated dataset list")
     args = parser.parse_args()
+    datasets = tuple(d.strip() for d in args.datasets.split(",") if d.strip())
     run_root = Path(args.run_root)
     stamp = args.stamp or latest_stamp(run_root)
     stamp_root = run_root / stamp
     sources = load_sources(stamp_root)
-    rows: dict[str, dict[str, dict]] = {d: {} for d in DATASETS}
-    for dataset in DATASETS:
+    rows: dict[str, dict[str, dict]] = {d: {} for d in datasets}
+    for dataset in datasets:
         for kind in ("backbone", "control", *(name for name, _ in GATES)):
             payload, cfg = load_result(sources[(dataset, kind)][1])
             diag = payload.get("diagnostic_summary", {})
@@ -146,18 +150,20 @@ def main() -> None:
             rel_deg, adapt_drop = gate_eval(rows[dataset]["backbone"]["mse"], rows[dataset]["control"]["mse"], rows[dataset][kind]["mse"], rows[dataset]["control"]["adapt_rate"], rows[dataset][kind]["adapt_rate"])
             rows[dataset][kind]["rel_deg"] = rel_deg
             rows[dataset][kind]["adapt_drop"] = adapt_drop
-    selected, verdict = choose_threshold(rows)
-    md = [f"# KCC Drift-Gate Summary ({stamp})", "", verdict, "", "| threshold | murata deg% | electricity deg% | solar deg% | avg adapt |", "| --- | ---: | ---: | ---: | ---: |"]
-    sweep_csv = [["threshold", "murata_rel_deg", "electricity_rel_deg", "solar_rel_deg", "avg_adapt_rate"]]
+    selected, verdict = choose_threshold(rows, datasets)
+    deg_headers = " | ".join(f"{d} deg%" for d in datasets)
+    md = [f"# KCC Drift-Gate Summary ({stamp})", "", verdict, "", f"| threshold | {deg_headers} | avg adapt |", "| --- |" + " ---: |" * (len(datasets) + 1)]
+    sweep_csv = [["threshold", *(f"{d}_rel_deg" for d in datasets), "avg_adapt_rate"]]
     for kind, thr in GATES:
-        avg_adapt = sum(rows[d][kind]["adapt_rate"] for d in DATASETS) / len(DATASETS)
-        md.append(f"| {thr:.1f} | {rows['murata'][kind]['rel_deg']:.3f} | {rows['electricity'][kind]['rel_deg']:.3f} | {rows['solar'][kind]['rel_deg']:.3f} | {avg_adapt:.3f} |")
-        sweep_csv.append([f"{thr:.1f}", f"{rows['murata'][kind]['rel_deg']:.6f}", f"{rows['electricity'][kind]['rel_deg']:.6f}", f"{rows['solar'][kind]['rel_deg']:.6f}", f"{avg_adapt:.6f}"])
+        avg_adapt = sum(rows[d][kind]["adapt_rate"] for d in datasets) / len(datasets)
+        degs = " | ".join(f"{rows[d][kind]['rel_deg']:.3f}" for d in datasets)
+        md.append(f"| {thr:.1f} | {degs} | {avg_adapt:.3f} |")
+        sweep_csv.append([f"{thr:.1f}", *(f"{rows[d][kind]['rel_deg']:.6f}" for d in datasets), f"{avg_adapt:.6f}"])
     selected = selected or "gate_0p5"
     main_csv = [["dataset", "method", "mse", "mae", "smape"]]
     eff_csv = [["dataset", "control_adapt_rate", "gate_adapt_rate", "drift_skip_rate", "rollback_skip_rate", "param_ratio"]]
     md.extend(["", "| dataset | method | MSE | MAE | sMAPE |", "| --- | --- | ---: | ---: | ---: |"])
-    for dataset in DATASETS:
+    for dataset in datasets:
         for kind, label in (("backbone", "backbone"), ("control", "control"), (selected, selected)):
             row = rows[dataset][kind]
             md.append(f"| {dataset} | {label} | {row['mse']:.4f} | {row['mae']:.4f} | {row['smape']:.2f} |")
@@ -174,7 +180,7 @@ def main() -> None:
     write_csv(out / "threshold_sweep.csv", sweep_csv)
     write_csv(out / "main_table.csv", main_csv)
     write_csv(out / "efficiency_table.csv", eff_csv)
-    write_svg(out / "adapt_rate.svg", selected, rows)
+    write_svg(out / "adapt_rate.svg", selected, rows, datasets)
     print("\n".join(md))
     print(f"\nWrote report artifacts to {out}")
 

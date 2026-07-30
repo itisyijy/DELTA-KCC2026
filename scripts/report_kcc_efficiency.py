@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 
-ROOT = Path("/home/jylee/DLinear-Season-Trend")
+ROOT = Path("/home/jylee/DELTA-KCC2026")
 RUN_ROOT = ROOT / "runs" / "kcc_drift_gate_sweep"
 GATES = ("gate_0p3", "gate_0p5", "gate_1p0")
 
@@ -71,7 +71,7 @@ def choose_gate(rows: dict[str, dict[str, dict]], datasets: list[str]) -> str:
             mean_adapt += adapt
             if rel_deg(rows[dataset]["backbone"], variant) > 0.5:
                 valid = False
-            if dataset in {"electricity", "solar"} and (adapt <= 0.01 or adapt >= 0.99):
+            if dataset in {"electricity", "solar", "traffic"} and (adapt <= 0.01 or adapt >= 0.99):
                 valid = False
         if valid:
             dist = abs(float(gate.split("_")[-1].replace("p", ".")) - 0.5)

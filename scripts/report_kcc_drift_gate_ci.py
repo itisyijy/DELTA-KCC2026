@@ -9,9 +9,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-ROOT = Path("/home/jylee/DLinear-Season-Trend")
+ROOT = Path("/home/jylee/DELTA-KCC2026")
 RUN_ROOT = ROOT / "runs" / "kcc_drift_gate_sweep"
 DATASETS = ("murata", "electricity", "solar")
+# High-variate CSV datasets where a degenerate adapt-rate (~0 or ~1) invalidates the gate.
+HIGH_VARIATE = {"electricity", "solar", "traffic"}
 GATES = (("gate_0p3", 0.3), ("gate_0p5", 0.5), ("gate_1p0", 1.0))
 
 
@@ -41,19 +43,19 @@ def load_payload(base: Path) -> dict:
     return json.loads(run_dir.joinpath("metrics.json").read_text())
 
 
-def select_gate(rows: dict[str, dict[str, dict]]) -> tuple[str, str]:
+def select_gate(rows: dict[str, dict[str, dict]], datasets: tuple[str, ...]) -> tuple[str, str]:
     candidates = []
     for kind, thr in GATES:
         valid = True
         mean_adapt = 0.0
-        for dataset in DATASETS:
+        for dataset in datasets:
             gated = rows[dataset][kind]
-            if dataset in {"electricity", "solar"} and (gated["adapt_rate"] <= 0.01 or gated["adapt_rate"] >= 0.99):
+            if dataset in HIGH_VARIATE and (gated["adapt_rate"] <= 0.01 or gated["adapt_rate"] >= 0.99):
                 valid = False
             if gated["rel_deg"] > 0.5:
                 valid = False
             mean_adapt += gated["adapt_rate"]
-        candidates.append((kind, thr, valid, mean_adapt / len(DATASETS)))
+        candidates.append((kind, thr, valid, mean_adapt / len(datasets)))
     valid_rows = [row for row in candidates if row[2]]
     if not valid_rows:
         return "gate_0p5", "No shared threshold satisfied constraints; defaulting to gate_0p5."
@@ -80,15 +82,17 @@ def main() -> None:
     parser.add_argument("--n-bootstrap", type=int, default=10000)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--datasets", default=",".join(DATASETS), help="Comma-separated dataset list")
     args = parser.parse_args()
 
+    datasets = tuple(d.strip() for d in args.datasets.split(",") if d.strip())
     run_root = Path(args.run_root)
     stamp = args.stamp or latest_stamp(run_root)
     stamp_root = run_root / stamp
     sources = load_sources(stamp_root)
 
-    rows: dict[str, dict[str, dict]] = {d: {} for d in DATASETS}
-    for dataset in DATASETS:
+    rows: dict[str, dict[str, dict]] = {d: {} for d in datasets}
+    for dataset in datasets:
         backbone = load_payload(sources[(dataset, "backbone")])
         control = load_payload(sources[(dataset, "control")])
         rows[dataset]["backbone"] = {"avg": backbone["avg"], "per_client": backbone["per_client"]}
@@ -108,13 +112,13 @@ def main() -> None:
             rows[dataset][kind]["rel_deg"] = rel_deg
             rows[dataset][kind]["adapt_rate"] = payload.get("diagnostic_summary", {}).get("adapt_rate", 0.0)
 
-    gate_kind, gate_msg = select_gate(rows)
+    gate_kind, gate_msg = select_gate(rows, datasets)
 
     lines = [f"# KCC Drift-Gate Bootstrap CI ({stamp})", "", gate_msg, ""]
     lines.append("| dataset | metric | mean diff | CI low | CI high | n_clients |")
     lines.append("| --- | --- | ---: | ---: | ---: | ---: |")
 
-    for dataset in DATASETS:
+    for dataset in datasets:
         base = rows[dataset]["backbone"]["per_client"]
         gate = rows[dataset][gate_kind]["per_client"]
         ids = sorted(set(base.keys()) & set(gate.keys()))
