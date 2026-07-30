@@ -5,7 +5,7 @@
 #   Mechanism 3: Inactive-window skip (min_active_frac)
 set -eu
 
-ROOT=/home/jylee/DLinear-Season-Trend
+ROOT=/home/jylee/DELTA-KCC2026
 PYTHON=${PYTHON:-/home/jylee/miniconda3/envs/kcc2026/bin/python}
 DEVICE=${DEVICE:-cuda:1}
 BASE_CFG="$ROOT/configs/murata/fed_tta.yaml"

@@ -10,7 +10,7 @@
 
 set -eu
 
-cd /home/jylee/DLinear-Season-Trend
+cd /home/jylee/DELTA-KCC2026
 PYTHON=/home/jylee/miniconda3/envs/kcc2026/bin/python
 DEVICE="${1:-cuda:1}"
 STAMP=$(date +%Y%m%d_%H%M%S)

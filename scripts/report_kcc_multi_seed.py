@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-ROOT = Path("/home/jylee/DLinear-Season-Trend")
+ROOT = Path("/home/jylee/DELTA-KCC2026")
 RUN_ROOT = ROOT / "runs" / "kcc_multi_seed"
 
 

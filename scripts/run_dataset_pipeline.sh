@@ -17,7 +17,7 @@ if [ "$#" -ne 3 ]; then
   exit 1
 fi
 
-cd /home/jylee/DLinear-Season-Trend
+cd /home/jylee/DELTA-KCC2026
 DATASET="$1"
 DEVICE_A="$2"
 DEVICE_B="$3"

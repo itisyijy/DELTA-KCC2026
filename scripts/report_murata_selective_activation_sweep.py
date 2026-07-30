@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-ROOT = Path("/home/jylee/DLinear-Season-Trend")
+ROOT = Path("/home/jylee/DELTA-KCC2026")
 RUN_ROOT = ROOT / "runs" / "murata_selective_activation_sweep"
 
 

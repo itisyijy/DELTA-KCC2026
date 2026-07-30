@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=/home/jylee/DLinear-Season-Trend
+ROOT=/home/jylee/DELTA-KCC2026
 PYTHON=${PYTHON:-/home/jylee/miniconda3/envs/kcc2026/bin/python}
 DEVICE=${DEVICE:-cuda:1}
 RUN_ROOT="$ROOT/runs/murata_backbone_eval"

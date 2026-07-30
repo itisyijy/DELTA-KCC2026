@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=/home/jylee/DLinear-Season-Trend
+ROOT=/home/jylee/DELTA-KCC2026
 PYTHON=${PYTHON:-python3}
 DEVICE=${DEVICE:-cuda:1}
 BASE_CFG="$ROOT/configs/murata/fed_tta.yaml"
